@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Carrier Doc Puller</title>
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <header>
+    <h1>Carrier Doc Puller</h1>
+    <p class="subtitle">Infer take-home &middot; pull policy documents from a carrier portal</p>
+  </header>
+
+  <main id="root">
+    <!-- FORM STATE -->
+    <section id="state-form" class="state">
+      <h2>1. Pick a carrier and sign in</h2>
+      <form id="login-form">
+        <label>
+          Carrier
+          <select name="carrier" required>
+            <option value="geico" selected>Geico</option>
+            <option value="progressive" disabled>Progressive (coming soon)</option>
+            <option value="allstate" disabled>Allstate (coming soon)</option>
+            <option value="state_farm" disabled>State Farm (coming soon)</option>
+          </select>
+        </label>
+        <label>
+          Username / Email / Policy #
+          <input name="username" type="text" autocomplete="username" required />
+        </label>
+        <label>
+          Password
+          <input name="password" type="password" autocomplete="current-password" required />
+        </label>
+        <button type="submit">Log In</button>
+        <p class="hint">Credentials stay in memory for this request only. Session cookies persist on disk so the next run can skip MFA.</p>
+      </form>
+    </section>
+
+    <!-- WAITING STATE -->
+    <section id="state-waiting" class="state hidden">
+      <h2><span class="spinner"></span> Working&hellip;</h2>
+      <p id="waiting-detail">Starting up</p>
+      <p class="hint">Status: <code id="waiting-state">—</code></p>
+    </section>
+
+    <!-- MFA STATE -->
+    <section id="state-mfa" class="state hidden">
+      <h2>2. Enter your verification code</h2>
+      <p>The carrier sent a code to the phone or email on file. Enter it below.</p>
+      <form id="mfa-form">
+        <label>
+          Code
+          <input name="code" type="text" inputmode="numeric" autocomplete="one-time-code" required autofocus />
+        </label>
+        <button type="submit">Submit</button>
+      </form>
+    </section>
+
+    <!-- DOCS STATE -->
+    <section id="state-docs" class="state hidden">
+      <h2>3. Policy documents</h2>
+      <p id="docs-summary"></p>
+      <p id="docs-latency" class="hint"></p>
+      <ul id="docs-list"></ul>
+      <button id="restart-btn" type="button">Start over</button>
+    </section>
+
+    <!-- ERROR STATE -->
+    <section id="state-error" class="state hidden">
+      <h2>Something went wrong</h2>
+      <p id="error-msg"></p>
+      <button id="error-restart-btn" type="button">Start over</button>
+    </section>
+  </main>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

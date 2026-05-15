@@ -1,0 +1,57 @@
+/* Intentionally utilitarian — the spec says "keep it ugly, we care about it working." */
+
+* { box-sizing: border-box; }
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  max-width: 720px;
+  margin: 0 auto;
+  padding: 1.5rem 1rem 4rem;
+  color: #222;
+  background: #fafafa;
+}
+
+header h1 { margin: 0 0 0.25rem; font-size: 1.5rem; }
+.subtitle { color: #666; margin: 0 0 1.5rem; font-size: 0.85rem; }
+
+.state { background: #fff; border: 1px solid #ddd; border-radius: 4px; padding: 1rem 1.25rem; }
+.state h2 { margin: 0 0 0.75rem; font-size: 1.1rem; }
+.hidden { display: none; }
+
+form { display: flex; flex-direction: column; gap: 0.75rem; }
+label { display: flex; flex-direction: column; gap: 0.25rem; font-size: 0.85rem; }
+input, select {
+  font-size: 1rem; padding: 0.5rem; border: 1px solid #bbb; border-radius: 3px;
+  background: #fff;
+}
+button {
+  font-size: 1rem; padding: 0.55rem 1rem; cursor: pointer;
+  background: #1a4fa0; color: #fff; border: 0; border-radius: 3px;
+  align-self: flex-start;
+}
+button:hover { background: #143b78; }
+button:disabled { background: #888; cursor: not-allowed; }
+
+.hint { font-size: 0.8rem; color: #666; margin-top: 0.5rem; }
+
+#docs-list { list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 1rem; }
+#docs-list li { border: 1px solid #ddd; border-radius: 3px; padding: 0.75rem; background: #fdfdfd; }
+#docs-list .doc-name { font-weight: 600; margin-bottom: 0.5rem; }
+#docs-list embed { width: 100%; height: 360px; border: 1px solid #ccc; background: #fff; }
+#docs-list .doc-meta { font-size: 0.8rem; color: #666; margin-top: 0.4rem; }
+#docs-list .doc-actions { margin-top: 0.5rem; }
+#docs-list .doc-actions a {
+  display: inline-block; padding: 0.35rem 0.7rem;
+  background: #eee; color: #222; border-radius: 3px;
+  text-decoration: none; font-size: 0.85rem;
+}
+
+.spinner {
+  display: inline-block; width: 14px; height: 14px;
+  border: 2px solid #ccc; border-top-color: #1a4fa0; border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+  vertical-align: middle;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
+#error-msg { color: #b00020; padding: 0.75rem; background: #fff0f0; border: 1px solid #ffd0d0; border-radius: 3px; }
