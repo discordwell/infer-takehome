@@ -6,11 +6,19 @@ from ..models import Carrier
 from .base import CarrierFlow
 from .geico import GeicoFlow
 from .mock import MockFlow
+from .usaa import UsaaFlow
 
 
 def _build() -> dict[Carrier, CarrierFlow]:
-    geico: CarrierFlow = MockFlow() if os.getenv("CARRIER_MOCK") == "1" else GeicoFlow()
-    return {Carrier.GEICO: geico}
+    if os.getenv("CARRIER_MOCK") == "1":
+        return {
+            Carrier.GEICO: MockFlow(Carrier.GEICO),
+            Carrier.USAA: MockFlow(Carrier.USAA),
+        }
+    return {
+        Carrier.GEICO: GeicoFlow(),
+        Carrier.USAA: UsaaFlow(),
+    }
 
 
 _FLOWS: dict[Carrier, CarrierFlow] = _build()

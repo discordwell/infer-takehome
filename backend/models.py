@@ -15,6 +15,7 @@ class SessionState(str, Enum):
 
 
 class Carrier(str, Enum):
+    USAA = "usaa"
     GEICO = "geico"
     PROGRESSIVE = "progressive"
     ALLSTATE = "allstate"

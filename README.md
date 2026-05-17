@@ -8,7 +8,7 @@ A small web app that signs into a personal-lines auto insurance carrier portal, 
 
 - **Backend:** Python 3.11+ • FastAPI • Playwright (async) • httpx • Server-Sent Events
 - **Frontend:** vanilla HTML / CSS / JS (single file each, no build step)
-- **Active carrier:** Geico. Progressive / Allstate / State Farm appear in the dropdown but are stubbed — the `CarrierFlow` abstraction makes each one ~half a day to add.
+- **Active carriers:** USAA and Geico. Progressive / Allstate / State Farm appear in the dropdown but are stubbed.
 
 ## Quickstart
 
@@ -19,11 +19,11 @@ uv run uvicorn backend.main:app --port 8000
 # open http://localhost:8000
 ```
 
-For the live Geico flow, fill `.env` first:
+For live carrier flows, fill `.env` first:
 
 ```bash
 cp .env.example .env
-# edit .env and set GEICO_USERNAME / GEICO_PASSWORD if you want to run the smoke test
+# set USAA_USERNAME / USAA_PASSWORD or GEICO_USERNAME / GEICO_PASSWORD
 ```
 
 ## Run modes
@@ -34,9 +34,9 @@ cp .env.example .env
 CARRIER_MOCK=1 uv run uvicorn backend.main:app --port 8000
 ```
 
-The dropdown still shows Geico, but the Playwright flow is replaced with `MockFlow`: it sleeps ~1s total, requests an MFA code from the UI, then returns three valid 503-byte PDFs. This exercises every code path (state machine, SSE, MFA round-trip, session reuse) without a real carrier round-trip. Reviewers can:
+The Playwright flow is replaced with `MockFlow`: it sleeps ~1s total, requests an MFA code from the UI, then returns three valid 503-byte PDFs. This exercises every code path (state machine, SSE, MFA round-trip, session reuse) without a real carrier round-trip. Reviewers can:
 
-1. Pick Geico
+1. Pick USAA or Geico
 2. Enter anything for username / password (e.g. `demo@example.com` / `pw`)
 3. Submit, then enter any MFA code
 4. See three docs render inline with an end-to-end latency readout
@@ -48,13 +48,13 @@ MOCK_BAD_PASSWORD=1 CARRIER_MOCK=1 uv run uvicorn backend.main:app  # surfaces t
 MOCK_SKIP_MFA=1   CARRIER_MOCK=1 uv run uvicorn backend.main:app   # carrier-trusts-device path
 ```
 
-### Live Geico mode
+### Live carrier mode
 
-With real `GEICO_USERNAME` / `GEICO_PASSWORD` in `.env`, run plain `uvicorn` (no `CARRIER_MOCK`). The first run does a full Playwright login + MFA prompt + doc fetch. The second run (same username) skips MFA via the stored `storage_state` — visible in the Loom.
+With real credentials in `.env`, run plain `uvicorn` (no `CARRIER_MOCK`). USAA uses installed Google Chrome over CDP because USAA's Akamai edge blocks normal Playwright-launched Chromium before or during login. The first run does full login + email/phone MFA + doc fetch. The second run (same username) tries the stored `storage_state` quick path.
 
 ## Run flow
 
-1. Pick a carrier from the dropdown (Geico is the only one wired up).
+1. Pick a carrier from the dropdown.
 2. Enter portal username + password, submit.
 3. When MFA is required, the UI surfaces a code input. Enter the SMS/email code.
 4. Policy documents render inline (PDF preview + download button per doc).
@@ -65,8 +65,10 @@ Total post-MFA latency (carrier-side network + Playwright + doc download + rende
 ## Tests
 
 ```bash
-uv run pytest                                      # 24 tests, ~5s — no Chromium
-GEICO_USERNAME=… GEICO_PASSWORD=… uv run pytest tests/test_geico_smoke.py -v -s  # interactive
+uv run pytest                                      # no Chromium for the regular suite
+RUN_LIVE_SMOKE=1 uv run pytest tests/test_usaa_smoke.py -v -s   # interactive
+RUN_LIVE_SMOKE=1 uv run pytest tests/test_geico_smoke.py -v -s  # interactive
+uv run python -m scripts.run_usaa_once                         # live USAA helper
 ```
 
 The smoke test launches real Chromium, prompts on stdin for the MFA code, and asserts ≥1 PDF is returned. It is skipped automatically when creds aren't set.
@@ -84,6 +86,7 @@ backend/
   config.py            # env-loaded settings
   carriers/
     base.py            # CarrierFlow ABC
+    usaa.py            # USAA-specific Playwright flow
     geico.py           # Geico-specific Playwright flow
     mock.py            # MockFlow for testing without creds
     registry.py        # carrier → flow lookup
@@ -98,16 +101,16 @@ scripts/
 
 ## Latency
 
-Target is **< 8s from MFA submit to docs rendered**. Where the budget goes:
+Target is **< 8s from MFA submit to docs rendered**. USAA is bot-sensitive, so the implementation returns the first verified PDF immediately rather than walking every document row before rendering.
 
 | Step | Estimate |
 |---|---|
 | MFA POST → background task fills code | ~0.2 s |
-| Playwright submits + lands on dashboard | ~1.5–2.5 s |
-| Lift cookies into httpx, fetch doc index + PDFs in parallel | ~1.5–3 s |
+| USAA submits + lands on authenticated page | ~1–8 s |
+| Open latest document row and capture PDF | ~5–12 s |
 | SSE event with doc list to client | ~0.1 s |
 | `<embed>` requests PDF bytes from in-memory cache | ~0.5–1.5 s |
-| **Total** | **~4–7 s** |
+| **Measured USAA run** | **~19 s to first PDF after MFA** |
 
 Key trick: once Playwright has authenticated, we **lift cookies into an `httpx.AsyncClient` and fetch PDFs in parallel** (`asyncio.gather`). DOM-walking through Playwright would add several seconds.
 
@@ -122,13 +125,15 @@ After a successful run we persist Playwright's `storage_state` to `storage/sessi
 
 This is what makes "reliability and session reuse" measurable in the Loom — back-to-back runs visibly skip MFA on the second one.
 
+Latest USAA local check: stored state authenticated without MFA and returned one PDF in ~12.7s.
+
 ## Known limitations / out of scope
 
 - **Session state on disk is unencrypted.** Demo only — prod should encrypt with an env-key or OS keychain. Trivial to add (~10 lines).
 - **Single-user in-process state.** The session manager assumes one user at a time. Concurrent users would need either a Redis-backed manager or process-per-user.
-- **Only Geico is wired end-to-end.** Others (Progressive, Allstate, State Farm) are stubbed; each is ~half a day to add via `CarrierFlow`.
+- **USAA latency is above target.** The flow works and returns a PDF, but USAA's post-MFA navigation and document viewer are currently ~19s from MFA submit to first PDF in local testing.
 - **MFA timeout is 90s.** If the user doesn't type the code in time, the session errors out. No "resend code" flow.
-- **No bot-defense evasion beyond default Playwright + a desktop UA.** Geico's customer portal doesn't appear to need stealth (`ecams.geico.com` isn't behind Akamai); add `playwright-stealth` if a future portal does.
+- **USAA requires headed Chromium.** The adapter uses a Chrome-like context and debug dumps under `/tmp` when Akamai or the portal shape blocks progress.
 - **HTTPS termination is the deployer's problem.** Local demo is plain HTTP.
 
 ## Credentials sourcing

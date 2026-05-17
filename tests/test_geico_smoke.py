@@ -1,6 +1,6 @@
 """Smoke test for the live Geico flow.
 
-Requires real credentials in env:
+Requires RUN_LIVE_SMOKE=1 and real credentials in .env or env:
   GEICO_USERNAME=...
   GEICO_PASSWORD=...
 
@@ -9,22 +9,29 @@ arrives a few seconds after login). It asserts at least one document is
 returned. Skipped automatically when creds aren't set.
 
 Run explicitly:
-  uv run pytest tests/test_geico_smoke.py -v -s
+  RUN_LIVE_SMOKE=1 uv run pytest tests/test_geico_smoke.py -v -s
 """
 
 import os
 import sys
 
 import pytest
+from dotenv import load_dotenv
 
 from backend.carriers.geico import GeicoFlow
 from backend.models import Document
 from backend.playwright_runner import http_from_context, runner
 
+load_dotenv()
+
 
 pytestmark = pytest.mark.skipif(
-    not (os.getenv("GEICO_USERNAME") and os.getenv("GEICO_PASSWORD")),
-    reason="GEICO_USERNAME and GEICO_PASSWORD must be set",
+    not (
+        os.getenv("RUN_LIVE_SMOKE") == "1"
+        and os.getenv("GEICO_USERNAME")
+        and os.getenv("GEICO_PASSWORD")
+    ),
+    reason="RUN_LIVE_SMOKE=1, GEICO_USERNAME, and GEICO_PASSWORD must be set",
 )
 
 

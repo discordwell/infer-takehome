@@ -13,6 +13,7 @@
   let sessionId = null;
   let eventSource = null;
   let mfaStartTs = null;
+  let devCredentials = {};
 
   function show(name) {
     for (const s of STATES) {
@@ -36,6 +37,7 @@
     sessionId = null;
     mfaStartTs = null;
     document.getElementById("login-form").reset();
+    applyDevCredentials();
     document.getElementById("mfa-form").reset();
     document.getElementById("docs-list").innerHTML = "";
     document.getElementById("docs-summary").textContent = "";
@@ -123,6 +125,29 @@
     }[c]));
   }
 
+  async function loadDevCredentials() {
+    try {
+      const r = await fetch("/api/dev/credentials", { cache: "no-store" });
+      if (!r.ok) return;
+      const payload = await r.json();
+      devCredentials = payload.credentials || {};
+      applyDevCredentials();
+    } catch (_) { /* noop */ }
+  }
+
+  function applyDevCredentials() {
+    const form = document.getElementById("login-form");
+    const carrier = form.elements.carrier.value;
+    const creds = devCredentials[carrier];
+    if (!creds) return;
+    form.elements.username.value = creds.username || "";
+    form.elements.password.value = creds.password || "";
+  }
+
+  document
+    .getElementById("login-form")
+    .elements.carrier.addEventListener("change", applyDevCredentials);
+
   document.getElementById("login-form").addEventListener("submit", async (e) => {
     e.preventDefault();
     const submitBtn = e.target.querySelector("button[type=submit]");
@@ -162,4 +187,5 @@
 
   document.getElementById("restart-btn").addEventListener("click", resetUI);
   document.getElementById("error-restart-btn").addEventListener("click", resetUI);
+  loadDevCredentials();
 })();

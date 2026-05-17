@@ -13,5 +13,13 @@ class Settings(BaseSettings):
     mock_skip_mfa: bool = False
     mock_quick_path_ok: bool = True
 
+    # Optional credentials for smoke tests and demo pre-fill
+    geico_username: str | None = None
+    geico_password: str | None = None
+    usaa_username: str | None = None
+    usaa_password: str | None = None
+    usaa_mfa_email: str | None = None
+    dev_prefill_creds: bool = False
+
 
 settings = Settings()

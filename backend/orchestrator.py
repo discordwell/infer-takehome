@@ -27,14 +27,32 @@ async def execute_login(
     try:
         flow = get_flow(carrier)
         stored_state = storage.load(carrier.value, username)
+        context_options = flow.context_options()
 
-        async with runner.new_context(storage_state=stored_state) as ctx:
+        async with runner.new_context(
+            storage_state=stored_state, **context_options
+        ) as ctx:
             if stored_state is not None:
-                if await _try_quick_path(flow, ctx, manager, session_id, carrier, username):
+                if await _try_quick_path(
+                    flow,
+                    ctx,
+                    manager,
+                    session_id,
+                    carrier,
+                    username,
+                    context_options,
+                ):
                     return
 
             await _full_login(
-                flow, ctx, manager, session_id, carrier, username, password
+                flow,
+                ctx,
+                manager,
+                session_id,
+                carrier,
+                username,
+                password,
+                context_options,
             )
     except Exception as e:  # noqa: BLE001 — top of background task
         log.exception("login flow failed for session %s", session_id)
@@ -48,6 +66,7 @@ async def _try_quick_path(
     session_id: str,
     carrier: Carrier,
     username: str,
+    context_options: dict,
 ) -> bool:
     """Try to fetch docs using stored cookies. Returns True on success."""
     manager.transition(
@@ -59,7 +78,9 @@ async def _try_quick_path(
         if not authed:
             await page.close()
             return False
-        http = await http_from_context(ctx)
+        http = await http_from_context(
+            ctx, user_agent=context_options.get("user_agent")
+        )
         try:
             docs, doc_bytes = await flow.fetch_documents(page, http, ctx)
         finally:
@@ -84,6 +105,7 @@ async def _full_login(
     carrier: Carrier,
     username: str,
     password: str,
+    context_options: dict,
 ) -> None:
     manager.transition(session_id, SessionState.LOGGING_IN, detail="Logging in")
     page = await ctx.new_page()
@@ -96,7 +118,7 @@ async def _full_login(
     manager.transition(
         session_id, SessionState.FETCHING_DOCS, detail="Fetching documents"
     )
-    http = await http_from_context(ctx)
+    http = await http_from_context(ctx, user_agent=context_options.get("user_agent"))
     try:
         docs, doc_bytes = await flow.fetch_documents(page, http, ctx)
     finally:

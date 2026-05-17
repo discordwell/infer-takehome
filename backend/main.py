@@ -10,7 +10,8 @@ from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from sse_starlette.sse import EventSourceResponse
 
-from .models import LoginRequest, LoginResponse, MfaRequest, SessionState
+from .config import settings
+from .models import Carrier, LoginRequest, LoginResponse, MfaRequest, SessionState
 from .orchestrator import execute_login
 from .playwright_runner import runner
 from .session_manager import SessionNotFoundError, manager
@@ -83,6 +84,28 @@ async def submit_mfa(session_id: str, req: MfaRequest) -> dict[str, str]:
     except ValueError as e:
         raise HTTPException(status_code=409, detail=str(e))
     return {"status": "accepted"}
+
+
+@app.get("/api/dev/credentials")
+async def dev_credentials(request: Request) -> dict:
+    if not settings.dev_prefill_creds:
+        raise HTTPException(status_code=404, detail="dev credential prefill disabled")
+    client_host = request.client.host if request.client else None
+    if client_host not in {"127.0.0.1", "::1", "testclient", None}:
+        raise HTTPException(status_code=403, detail="local requests only")
+
+    creds = {}
+    if settings.usaa_username and settings.usaa_password:
+        creds[Carrier.USAA.value] = {
+            "username": settings.usaa_username,
+            "password": settings.usaa_password,
+        }
+    if settings.geico_username and settings.geico_password:
+        creds[Carrier.GEICO.value] = {
+            "username": settings.geico_username,
+            "password": settings.geico_password,
+        }
+    return {"credentials": creds}
 
 
 @app.get("/api/docs/{session_id}/{doc_id}")

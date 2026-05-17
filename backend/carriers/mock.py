@@ -35,7 +35,8 @@ MOCK_PDF = (
 
 
 class MockFlow(CarrierFlow):
-    carrier = Carrier.GEICO  # impersonates the active carrier
+    def __init__(self, carrier: Carrier = Carrier.GEICO) -> None:
+        self.carrier = carrier
 
     async def login(self, page: Page, username: str, password: str) -> None:
         await asyncio.sleep(0.4)

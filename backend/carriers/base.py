@@ -17,6 +17,10 @@ class CarrierFlow(ABC):
 
     carrier: Carrier
 
+    def context_options(self) -> dict:
+        """Optional Playwright context overrides for carrier-specific portals."""
+        return {}
+
     @abstractmethod
     async def login(self, page: Page, username: str, password: str) -> None:
         """Navigate to the carrier's login page and submit credentials.
