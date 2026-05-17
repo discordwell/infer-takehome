@@ -1,6 +1,7 @@
 services:
   infer:
     build: .
+    init: true
     ports:
       - "127.0.0.1:8310:8000"
     environment:
