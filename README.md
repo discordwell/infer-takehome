@@ -105,14 +105,14 @@ Target is **< 8s from MFA submit to docs rendered**. USAA is bot-sensitive, so t
 
 | Step | Estimate |
 |---|---|
-| MFA POST → background task fills code | ~0.2 s |
-| USAA submits + lands on authenticated page | ~1–8 s |
-| Open latest document row and capture PDF | ~5–12 s |
+| MFA POST → background task fills code | ~0.3 s |
+| USAA submits + lands on authenticated page | ~1.7 s |
+| Open latest document row and capture PDF | ~4.4 s |
 | SSE event with doc list to client | ~0.1 s |
 | `<embed>` requests PDF bytes from in-memory cache | ~0.5–1.5 s |
-| **Measured USAA run** | **~19 s to first PDF after MFA** |
+| **Measured USAA run** | **6.34 s to first PDF after MFA** |
 
-Key trick: once Playwright has authenticated, we **lift cookies into an `httpx.AsyncClient` and fetch PDFs in parallel** (`asyncio.gather`). DOM-walking through Playwright would add several seconds.
+Key trick: once Playwright has authenticated, the USAA adapter navigates straight to the real document-center route, clicks the first document row, and races PDF response/download/popup signals. It returns the first verified PDF immediately instead of waiting for page-wide `networkidle` or walking every document row.
 
 ## Session reuse
 
@@ -125,13 +125,12 @@ After a successful run we persist Playwright's `storage_state` to `storage/sessi
 
 This is what makes "reliability and session reuse" measurable in the Loom — back-to-back runs visibly skip MFA on the second one.
 
-Latest USAA local check: stored state authenticated without MFA and returned one PDF in ~12.7s.
+Latest USAA local check: stored state skipped MFA and returned one PDF in ~4.81s.
 
 ## Known limitations / out of scope
 
 - **Session state on disk is unencrypted.** Demo only — prod should encrypt with an env-key or OS keychain. Trivial to add (~10 lines).
 - **Single-user in-process state.** The session manager assumes one user at a time. Concurrent users would need either a Redis-backed manager or process-per-user.
-- **USAA latency is above target.** The flow works and returns a PDF, but USAA's post-MFA navigation and document viewer are currently ~19s from MFA submit to first PDF in local testing.
 - **MFA timeout is 90s.** If the user doesn't type the code in time, the session errors out. No "resend code" flow.
 - **USAA requires headed Chromium.** The adapter uses a Chrome-like context and debug dumps under `/tmp` when Akamai or the portal shape blocks progress.
 - **HTTPS termination is the deployer's problem.** Local demo is plain HTTP.

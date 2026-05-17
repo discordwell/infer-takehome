@@ -72,27 +72,44 @@ async def _try_quick_path(
     manager.transition(
         session_id, SessionState.FETCHING_DOCS, detail="Resuming session"
     )
+    _reset_timing(flow)
+    _mark_timing(flow, "quick_path_start")
     page = await ctx.new_page()
+    http = await http_from_context(
+        ctx, user_agent=context_options.get("user_agent")
+    )
     try:
+        if carrier == Carrier.USAA:
+            try:
+                docs, doc_bytes = await flow.fetch_documents(page, http, ctx)
+                # refresh stored state in case carrier rotated cookies
+                storage.save(carrier.value, username, await ctx.storage_state())
+                _mark_timing(flow, "docs_ready_publish")
+                manager.set_docs(session_id, docs, doc_bytes)
+                _log_timing(flow, session_id)
+                return True
+            except Exception as e:  # noqa: BLE001
+                log.warning("direct quick-path document fetch failed: %s", e)
+
         authed = await flow.is_authenticated(page)
         if not authed:
-            await page.close()
             return False
+        await http.aclose()
         http = await http_from_context(
             ctx, user_agent=context_options.get("user_agent")
         )
-        try:
-            docs, doc_bytes = await flow.fetch_documents(page, http, ctx)
-        finally:
-            await http.aclose()
+        docs, doc_bytes = await flow.fetch_documents(page, http, ctx)
         # refresh stored state in case carrier rotated cookies
         storage.save(carrier.value, username, await ctx.storage_state())
+        _mark_timing(flow, "docs_ready_publish")
         manager.set_docs(session_id, docs, doc_bytes)
+        _log_timing(flow, session_id)
         return True
     except Exception as e:  # noqa: BLE001
         log.warning("quick-path failed, falling back to login: %s", e)
         return False
     finally:
+        await http.aclose()
         if not page.is_closed():
             await page.close()
 
@@ -113,11 +130,18 @@ async def _full_login(
 
     if await flow.mfa_required(page):
         code = await manager.request_mfa(session_id)
+        _reset_timing(flow)
+        _mark_timing(flow, "mfa_code_received")
         await flow.submit_mfa(page, code)
+        _mark_timing(flow, "mfa_submit_returned")
+    else:
+        _reset_timing(flow)
+        _mark_timing(flow, "no_mfa_fetch_start")
 
     manager.transition(
         session_id, SessionState.FETCHING_DOCS, detail="Fetching documents"
     )
+    _mark_timing(flow, "fetching_docs_state")
     http = await http_from_context(ctx, user_agent=context_options.get("user_agent"))
     try:
         docs, doc_bytes = await flow.fetch_documents(page, http, ctx)
@@ -125,4 +149,26 @@ async def _full_login(
         await http.aclose()
 
     storage.save(carrier.value, username, await ctx.storage_state())
+    _mark_timing(flow, "docs_ready_publish")
     manager.set_docs(session_id, docs, doc_bytes)
+    _log_timing(flow, session_id)
+
+
+def _reset_timing(flow: CarrierFlow) -> None:
+    reset = getattr(flow, "reset_timings", None)
+    if callable(reset):
+        reset()
+
+
+def _mark_timing(flow: CarrierFlow, label: str) -> None:
+    mark = getattr(flow, "mark_timing", None)
+    if callable(mark):
+        mark(label)
+
+
+def _log_timing(flow: CarrierFlow, session_id: str) -> None:
+    report = getattr(flow, "timing_report", None)
+    if callable(report):
+        summary = report()
+        if summary:
+            log.info("timing summary for session %s: %s", session_id, summary)

@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import asyncio
-import tempfile
 import logging
 import re
+import time
 from pathlib import Path
 
 import httpx
@@ -22,12 +22,30 @@ DASHBOARD_URL_CANDIDATES = (
     "https://www.usaa.com/",
 )
 DOCS_URL_CANDIDATES = (
+    "https://www.usaa.com/inet/ent_edde/ViewMyDocuments",
+    "https://www.usaa.com/inet/gas_pc_pas/GyMemberAutoHistoryServlet",
+    (
+        "https://www.usaa.com/inet/gas_pc_pas/GyMemberAutoIdServlet"
+        "?action=INIT&proofOfInsuranceType=IDCARD"
+    ),
     "https://www.usaa.com/my/documents",
     "https://www.usaa.com/inet/wc/document_center",
     "https://www.usaa.com/my/insurance",
     "https://www.usaa.com/inet/wc/insurance_auto_main",
 )
 DEBUG_DIR = Path("/tmp")
+USAA_CHROME_PROFILE_DIR = (
+    Path(__file__).resolve().parent.parent.parent
+    / "storage"
+    / "browser-profiles"
+    / "usaa-chrome"
+)
+MFA_CODE_INPUT_SELECTOR = (
+    "input[autocomplete='one-time-code']:visible, "
+    "input[inputmode='numeric']:visible, "
+    "input[name*='code' i]:visible, "
+    "input[id*='code' i]:visible"
+)
 
 USAA_USER_AGENT = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
@@ -62,10 +80,31 @@ class UsaaFlow(CarrierFlow):
 
     carrier = Carrier.USAA
 
+    def __init__(self) -> None:
+        self._timing_origin: float | None = None
+        self._timings: list[tuple[str, float]] = []
+
+    def reset_timings(self) -> None:
+        self._timing_origin = time.perf_counter()
+        self._timings = []
+
+    def mark_timing(self, label: str) -> None:
+        if self._timing_origin is None:
+            self.reset_timings()
+        assert self._timing_origin is not None
+        elapsed = time.perf_counter() - self._timing_origin
+        self._timings.append((label, elapsed))
+        log.info("usaa timing: %.3fs %s", elapsed, label)
+
+    def timing_report(self) -> str:
+        return ", ".join(
+            f"{label}={elapsed:.3f}s" for label, elapsed in self._timings
+        )
+
     def context_options(self) -> dict:
         return {
             "_launch_chrome_cdp": True,
-            "_chrome_profile_dir": tempfile.mkdtemp(prefix="usaa-chrome-", dir="/tmp"),
+            "_chrome_profile_dir": str(USAA_CHROME_PROFILE_DIR),
             "user_agent": USAA_USER_AGENT,
             "viewport": {"width": 1280, "height": 800},
             "locale": "en-US",
@@ -158,12 +197,7 @@ class UsaaFlow(CarrierFlow):
         if any(k in url for k in ("mfa", "otp", "verify", "security", "challenge")):
             log.info("usaa: MFA detected via URL=%s", url)
             return True
-        if await page.locator(
-            "input[autocomplete='one-time-code'], "
-            "input[inputmode='numeric']:visible, "
-            "input[name*='code' i]:visible, "
-            "input[id*='code' i]:visible"
-        ).count() > 0:
+        if await page.locator(MFA_CODE_INPUT_SELECTOR).count() > 0:
             log.info("usaa: MFA detected via code input")
             return True
         body = (await self._body_text(page)).lower()
@@ -193,6 +227,7 @@ class UsaaFlow(CarrierFlow):
                 timeout_ms=20000,
             )
             await self._slow_fill(otp_field, code)
+            self.mark_timing("mfa_code_filled")
             try:
                 submit = await self._first_present(
                     page.get_by_role(
@@ -202,13 +237,15 @@ class UsaaFlow(CarrierFlow):
                     timeout_ms=6000,
                 )
                 await submit.click()
+                self.mark_timing("mfa_submit_clicked")
             except Exception:
                 await otp_field.press("Enter")
+                self.mark_timing("mfa_submit_pressed_enter")
         except Exception as e:
             await self._dump_debug(page, "mfa-failure")
             raise RuntimeError(f"USAA MFA interaction failed: {e}") from e
 
-        await self._settle(page, delay_ms=500, networkidle_timeout_ms=3000)
+        await self._wait_after_mfa_submit(page)
 
     async def is_authenticated(self, page: Page) -> bool:
         await self._prepare_page(page)
@@ -232,27 +269,47 @@ class UsaaFlow(CarrierFlow):
         http: httpx.AsyncClient,
         ctx: BrowserContext,
     ) -> tuple[list[Document], dict[str, bytes]]:
+        self.mark_timing("docs_fetch_start")
         await self._prepare_page(page)
         candidates: list[tuple[str, str]] = []
         for url in DOCS_URL_CANDIDATES:
             try:
-                await page.goto(url, wait_until="domcontentloaded", timeout=15000)
+                resp = await page.goto(url, wait_until="domcontentloaded", timeout=15000)
+                self.mark_timing("docs_url_loaded")
+                if resp:
+                    content_type = resp.headers.get("content-type", "application/pdf")
+                    if self._looks_like_document_response(resp):
+                        try:
+                            body = await resp.body()
+                            if self._is_document_body(body, content_type):
+                                self.mark_timing("doc_pdf_bytes")
+                                return self._single_document(
+                                    body,
+                                    content_type,
+                                    self._name_from_headers(
+                                        resp.headers, resp.url, "USAA document 1"
+                                    ),
+                                )
+                        except Exception:
+                            pass
+                title = (await page.title()).lower()
+                if "logon" in page.url.lower() or "login" in page.url.lower():
+                    continue
+                if "page not found" in title:
+                    continue
                 try:
                     await page.locator("button[data-testid^='readDocument-']").first.wait_for(
                         state="visible", timeout=8000
                     )
+                    self.mark_timing("docs_button_visible")
                 except Exception:
                     await page.wait_for_timeout(500)
             except Exception as e:
                 log.warning("usaa: docs URL %s failed: %s", url, e)
                 continue
-            title = (await page.title()).lower()
-            if "logon" in page.url.lower() or "login" in page.url.lower():
-                continue
-            if "page not found" in title:
-                continue
             docs, doc_bytes = await self._fetch_document_buttons(page, http, ctx)
             if docs:
+                self.mark_timing("docs_first_document_ready")
                 return docs, doc_bytes
             candidates = await self._collect_document_links(page)
             if candidates:
@@ -317,103 +374,184 @@ class UsaaFlow(CarrierFlow):
         if count == 0:
             return [], {}
 
-        docs: list[Document] = []
-        doc_bytes: dict[str, bytes] = {}
-        docs_url = page.url
-        for idx in range(min(count, 1)):
-            button = buttons.nth(idx)
-            try:
-                name = (await button.inner_text(timeout=2000)).strip() or f"USAA document {idx + 1}"
-            except Exception:
-                name = f"USAA document {idx + 1}"
+        button = buttons.first
+        try:
+            name = (await button.inner_text(timeout=2000)).strip() or "USAA document 1"
+        except Exception:
+            name = "USAA document 1"
 
-            responses = []
+        try:
+            href = await self._direct_document_href(button)
+            if href:
+                direct = await self._fetch_direct_document(http, href, name)
+                if direct is not None:
+                    body, content_type, display_name = direct
+                    return self._single_document(body, content_type, display_name)
+
+            response_queue: asyncio.Queue = asyncio.Queue()
+            saw_response_headers = False
 
             def on_response(resp):
-                content_type = resp.headers.get("content-type", "").lower()
-                url = resp.url.lower()
-                if (
-                    "pdf" in content_type
-                    or "octet-stream" in content_type
-                    or ".pdf" in url
-                    or "document" in url
-                    or "content" in url
-                ):
-                    responses.append(resp)
+                nonlocal saw_response_headers
+                if self._looks_like_document_response(resp):
+                    response_queue.put_nowait(resp)
+                    if not saw_response_headers:
+                        self.mark_timing("doc_pdf_response_headers")
+                        saw_response_headers = True
 
             page.on("response", on_response)
-            popup_task = asyncio.create_task(ctx.wait_for_event("page", timeout=5000))
-            download_task = asyncio.create_task(page.wait_for_event("download", timeout=5000))
+            download_task = asyncio.create_task(
+                page.wait_for_event("download", timeout=7000)
+            )
+            popup_task = asyncio.create_task(ctx.wait_for_event("page", timeout=7000))
             try:
                 await button.click(timeout=5000)
-                await page.wait_for_timeout(1500)
-
-                body = None
-                content_type = "application/pdf"
-                if download_task.done() and download_task.exception() is None:
-                    download = download_task.result()
-                    path = await download.path()
-                    if path:
-                        body = Path(path).read_bytes()
-                    suggested = download.suggested_filename
-                    if suggested:
-                        name = suggested
-
-                if body is None and popup_task.done() and popup_task.exception() is None:
-                    popup = popup_task.result()
-                    try:
-                        await popup.wait_for_load_state("domcontentloaded", timeout=8000)
-                    except Exception:
-                        pass
-                    body, content_type = await self._extract_document_from_page(
-                        popup, http
-                    )
-                    await popup.close()
-
-                if body is None:
-                    body, content_type = await self._extract_document_from_page(page, http)
-
-                if body is None:
-                    for resp in responses:
-                        try:
-                            content_type = resp.headers.get("content-type", "application/pdf")
-                            candidate = await resp.body()
-                            if self._is_document_body(candidate, content_type):
-                                body = candidate
-                                break
-                        except Exception:
-                            continue
-
-                if body is not None and self._is_document_body(body, content_type):
-                    doc_id = f"usaa-doc-{len(docs)}"
-                    display_name = name
-                    if "pdf" in content_type.lower() and not display_name.lower().endswith(".pdf"):
-                        display_name += ".pdf"
-                    doc = Document(
-                        id=doc_id,
-                        name=display_name,
-                        content_type=content_type,
-                        size_bytes=len(body),
-                    )
-                    docs.append(doc)
-                    doc_bytes[doc_id] = body
-            except Exception as e:
-                log.warning("usaa: document button %s failed: %s", idx, e)
+                self.mark_timing("doc_button_clicked")
+                payload = await self._first_document_payload(
+                    page, http, response_queue, download_task, popup_task, name
+                )
             finally:
                 page.remove_listener("response", on_response)
-                for task in (popup_task, download_task):
+                for task in (download_task, popup_task):
                     if not task.done():
                         task.cancel()
-                if page.url != docs_url:
-                    try:
-                        await page.goto(docs_url, wait_until="domcontentloaded", timeout=10000)
-                        await self._settle(page, delay_ms=500, networkidle_timeout_ms=2500)
-                        buttons = page.locator("button[data-testid^='readDocument-']")
-                    except Exception:
-                        break
-            if len(docs) >= 1:
-                break
-        return docs, doc_bytes
+
+            if payload is not None:
+                body, content_type, display_name = payload
+                return self._single_document(body, content_type, display_name)
+        except Exception as e:
+            log.warning("usaa: first document button failed: %s", e)
+        return [], {}
+
+    async def _first_document_payload(
+        self,
+        page: Page,
+        http: httpx.AsyncClient,
+        response_queue: asyncio.Queue,
+        download_task: asyncio.Task,
+        popup_task: asyncio.Task,
+        name: str,
+    ) -> tuple[bytes, str, str] | None:
+        async def from_response():
+            deadline = time.perf_counter() + 7.0
+            while True:
+                remaining = deadline - time.perf_counter()
+                if remaining <= 0:
+                    raise TimeoutError("no document response")
+                resp = await asyncio.wait_for(response_queue.get(), timeout=remaining)
+                content_type = resp.headers.get("content-type", "application/pdf")
+                body = await resp.body()
+                if self._is_document_body(body, content_type):
+                    self.mark_timing("doc_pdf_bytes")
+                    return body, content_type, self._name_from_response(resp, name)
+
+        async def from_download():
+            download = await download_task
+            path = await download.path()
+            if not path:
+                raise RuntimeError("download had no local path")
+            body = Path(path).read_bytes()
+            content_type = "application/pdf"
+            if not self._is_document_body(body, content_type):
+                raise RuntimeError("download was not a PDF")
+            self.mark_timing("doc_pdf_bytes")
+            return body, content_type, download.suggested_filename or name
+
+        async def from_popup():
+            popup = await popup_task
+            try:
+                try:
+                    await popup.wait_for_load_state("domcontentloaded", timeout=3500)
+                except Exception:
+                    pass
+                body, content_type = await self._extract_document_from_page(popup, http)
+                if body is None or not self._is_document_body(body, content_type):
+                    raise RuntimeError("popup did not expose a PDF")
+                self.mark_timing("doc_pdf_bytes")
+                return body, content_type, name
+            finally:
+                if not popup.is_closed():
+                    await popup.close()
+
+        async def from_current_page():
+            await page.wait_for_timeout(400)
+            body, content_type = await self._extract_document_from_page(page, http)
+            if body is None or not self._is_document_body(body, content_type):
+                raise RuntimeError("current page did not expose a PDF")
+            self.mark_timing("doc_pdf_bytes")
+            return body, content_type, name
+
+        tasks = [
+            asyncio.create_task(from_response()),
+            asyncio.create_task(from_download()),
+            asyncio.create_task(from_popup()),
+            asyncio.create_task(from_current_page()),
+        ]
+        try:
+            for completed in asyncio.as_completed(tasks, timeout=7.5):
+                try:
+                    return await completed
+                except Exception:
+                    continue
+        except TimeoutError:
+            return None
+        finally:
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+        return None
+
+    async def _direct_document_href(self, button: Locator) -> str | None:
+        try:
+            return await button.evaluate(
+                """el => {
+                    const attrs = ['href', 'data-href', 'data-url', 'data-document-url'];
+                    const candidates = [el, el.closest('a[href], [data-href], [data-url], [data-document-url]')];
+                    for (const node of candidates) {
+                        if (!node) continue;
+                        for (const attr of attrs) {
+                            const value = node.getAttribute(attr);
+                            if (value) return new URL(value, window.location.href).href;
+                        }
+                    }
+                    return null;
+                }"""
+            )
+        except Exception:
+            return None
+
+    async def _fetch_direct_document(
+        self, http: httpx.AsyncClient, href: str, name: str
+    ) -> tuple[bytes, str, str] | None:
+        try:
+            r = await http.get(href)
+            content_type = r.headers.get("content-type", "application/pdf")
+            if not self._is_document_body(r.content, content_type):
+                return None
+            self.mark_timing("doc_pdf_bytes")
+            return r.content, content_type, self._name_from_headers(
+                r.headers, href, name
+            )
+        except Exception as e:
+            log.warning("usaa: direct document fetch failed for %s: %s", href, e)
+            return None
+
+    def _single_document(
+        self, body: bytes, content_type: str, name: str
+    ) -> tuple[list[Document], dict[str, bytes]]:
+        display_name = name.strip() or "USAA document 1"
+        if (
+            ("pdf" in content_type.lower() or body.startswith(b"%PDF"))
+            and not display_name.lower().endswith(".pdf")
+        ):
+            display_name += ".pdf"
+        doc = Document(
+            id="usaa-doc-0",
+            name=display_name,
+            content_type=content_type,
+            size_bytes=len(body),
+        )
+        return [doc], {doc.id: body}
 
     async def _extract_document_from_page(
         self, page: Page, http: httpx.AsyncClient
@@ -441,16 +579,71 @@ class UsaaFlow(CarrierFlow):
             return False
         return body.startswith(b"%PDF") or "pdf" in lowered or "octet-stream" in lowered
 
+    @staticmethod
+    def _looks_like_document_response(resp) -> bool:
+        content_type = resp.headers.get("content-type", "").lower()
+        url = resp.url.lower()
+        return (
+            "pdf" in content_type
+            or "octet-stream" in content_type
+            or ".pdf" in url
+            or "document" in url
+            or "content" in url
+        )
+
+    @staticmethod
+    def _name_from_response(resp, fallback: str) -> str:
+        return UsaaFlow._name_from_headers(resp.headers, resp.url, fallback)
+
+    @staticmethod
+    def _name_from_headers(headers, url: str, fallback: str) -> str:
+        disposition = headers.get("content-disposition", "")
+        match = re.search(r'filename\*?=(?:UTF-8\'\')?"?([^";]+)', disposition, re.I)
+        if match:
+            return match.group(1).strip()
+        tail = url.split("?", 1)[0].rstrip("/").rsplit("/", 1)[-1]
+        if tail and "." in tail:
+            return tail
+        return fallback
+
     async def _prepare_page(self, page: Page) -> None:
         return None
 
+    async def _wait_after_mfa_submit(self, page: Page) -> None:
+        deadline = time.perf_counter() + 2.0
+        while time.perf_counter() < deadline:
+            code_inputs = await page.locator(MFA_CODE_INPUT_SELECTOR).count()
+            body = (await self._body_text(page, timeout_ms=500)).lower()
+            if any(
+                phrase in body
+                for phrase in (
+                    "invalid code",
+                    "incorrect code",
+                    "code you entered",
+                    "expired",
+                )
+            ):
+                raise RuntimeError("USAA MFA code was rejected")
+            if code_inputs == 0:
+                self.mark_timing("mfa_code_input_gone")
+                return
+            url = page.url.lower()
+            challenge_tokens = (
+                "mfa",
+                "otp",
+                "verify",
+                "security",
+                "challenge",
+                "logon",
+            )
+            if not any(k in url for k in challenge_tokens):
+                self.mark_timing("mfa_url_left_challenge")
+                return
+            await page.wait_for_timeout(150)
+        self.mark_timing("mfa_short_wait_capped")
+
     async def _prefer_email_mfa(self, page: Page) -> None:
-        if await page.locator(
-            "input[autocomplete='one-time-code']:visible, "
-            "input[inputmode='numeric']:visible, "
-            "input[name*='code' i]:visible, "
-            "input[id*='code' i]:visible"
-        ).count() > 0:
+        if await page.locator(MFA_CODE_INPUT_SELECTOR).count() > 0:
             return
 
         target_email = (settings.usaa_mfa_email or "").lower()
@@ -458,12 +651,19 @@ class UsaaFlow(CarrierFlow):
         if not target_email and "email" not in body:
             return
 
+        if await page.locator(
+            "button[aria-busy='true']",
+            has_text=re.compile(r"email security code|email", re.I),
+        ).count():
+            if await self._wait_for_mfa_code_input(page, timeout_ms=15000):
+                return
+
         if "check your phone" in body and "different option" in body:
             try:
                 await page.get_by_text(
                     re.compile(r"i need a different option|different option", re.I)
                 ).click(timeout=5000)
-                await self._settle(page, delay_ms=750, networkidle_timeout_ms=2500)
+                await page.wait_for_timeout(750)
                 body = (await self._body_text(page)).lower()
             except Exception:
                 return
@@ -484,7 +684,9 @@ class UsaaFlow(CarrierFlow):
                 timeout_ms=5000,
             )
             await email_choice.click()
-            await self._settle(page, delay_ms=500, networkidle_timeout_ms=2500)
+            if await self._wait_for_mfa_code_input(page, timeout_ms=15000):
+                return
+            await page.wait_for_timeout(500)
         except Exception:
             pass
 
@@ -504,9 +706,18 @@ class UsaaFlow(CarrierFlow):
                 timeout_ms=3000,
             )
             await button.click()
-            await self._settle(page, delay_ms=750, networkidle_timeout_ms=2500)
+            await self._wait_for_mfa_code_input(page, timeout_ms=15000)
         except Exception:
             pass
+
+    async def _wait_for_mfa_code_input(self, page: Page, timeout_ms: int) -> bool:
+        try:
+            await page.locator(MFA_CODE_INPUT_SELECTOR).first.wait_for(
+                state="visible", timeout=timeout_ms
+            )
+            return True
+        except Exception:
+            return False
 
     async def _collect_document_links(self, page: Page) -> list[tuple[str, str]]:
         links: list[tuple[str, str]] = await page.eval_on_selector_all(
@@ -551,9 +762,9 @@ class UsaaFlow(CarrierFlow):
         except Exception:
             await loc.fill(value)
 
-    async def _body_text(self, page: Page) -> str:
+    async def _body_text(self, page: Page, timeout_ms: int = 3000) -> str:
         try:
-            return await page.locator("body").inner_text(timeout=3000)
+            return await page.locator("body").inner_text(timeout=timeout_ms)
         except Exception:
             return ""
 
