@@ -158,6 +158,7 @@ class PlaywrightRunner:
                 except Exception as e:  # noqa: BLE001
                     log.warning("Chrome CDP close failed: %s", e)
             _terminate_process_group(proc)
+            _clear_stale_profile_locks(profile_dir)
 
 
 runner = PlaywrightRunner()
