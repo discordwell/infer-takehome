@@ -4,6 +4,8 @@ A small web app that signs into a personal-lines auto insurance carrier portal, 
 
 > Reviewer notes: see [ASSIGNMENT.md](./ASSIGNMENT.md) for the prompt, [ARCHITECTURE.md](./ARCHITECTURE.md) for the design. **You can run the full UI flow without credentials** via the mock carrier mode below.
 
+Hosted demo: https://infer.discordwell.com
+
 ## Stack
 
 - **Backend:** Python 3.11+ • FastAPI • Playwright (async) • httpx • Server-Sent Events
@@ -18,6 +20,8 @@ uv run playwright install chromium   # ~150 MB browser download
 uv run uvicorn backend.main:app --port 8000
 # open http://localhost:8000
 ```
+
+For the live USAA flow, Google Chrome must be installed locally. The OVH Docker image includes Chrome + Xvfb.
 
 For live carrier flows, fill `.env` first:
 
@@ -137,4 +141,4 @@ Latest USAA local check: stored state skipped MFA and returned one PDF in ~4.81s
 
 ## Credentials sourcing
 
-Per the assignment: real credentials must come from a friend or family member. Geico was the chosen target because (a) no detectable bot wall on `ecams.geico.com`, (b) SMS/email MFA (vs. authenticator-app, which would block this design), (c) ~12% US market share so credentials are findable. See [ARCHITECTURE.md](./ARCHITECTURE.md) for the full rationale and the Progressive contingency.
+Per the assignment, real credentials must come from someone with a personal-lines policy. This submission used a real USAA account supplied by the user, exercised the email/SMS MFA path, fetched a real PDF, and then verified session reuse on the next run. Geico remains wired as a secondary adapter, but USAA is the measured carrier for the take-home.

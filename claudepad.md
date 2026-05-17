@@ -6,11 +6,19 @@ _Add session summaries above this line before context compaction. Keep only the 
 
 ## Key Findings
 
+### Final state (2026-05-17)
+
+- Active measured carrier is **USAA**, using installed Google Chrome over CDP because USAA/Akamai blocks normal Playwright Chromium.
+- Live USAA full MFA run returned one real PDF in **6.34s** from MFA code receipt to helper completion; first PDF bytes arrived at **6.046s**.
+- Live USAA stored-session run skipped MFA and returned one PDF in **4.812s**.
+- Hosted at `https://infer.discordwell.com` on `ovh2` via Docker Compose on `127.0.0.1:8310` behind Caddy.
+- Offline suite: **27 passed, 2 skipped**.
+
 ### Project shape (2026-05-15)
 
 - Infer take-home: carrier portal doc puller. Repo `github.com/discordwell/infer-takehome` (private). Deadline 72h from 2026-05-14.
 - Stack confirmed: Python 3.11 + FastAPI + Playwright async + httpx + vanilla HTML/JS. SSE for status. uv-managed.
-- Active carrier wired end-to-end: **Geico** (`ecams.geico.com`). Others (Progressive, Allstate, State Farm) appear in dropdown but stubbed.
+- Initial active carrier was **Geico** (`ecams.geico.com`); final measured carrier is **USAA**. Others (Progressive, Allstate, State Farm) appear in dropdown but are stubbed.
 - Mock carrier path enabled via `CARRIER_MOCK=1` env — reviewers can exercise full flow without credentials.
 
 ### Geico portal notes
@@ -45,8 +53,8 @@ _Add session summaries above this line before context compaction. Keep only the 
 - **Frontend double-submit guard:** disable submit buttons during requests.
 - **EventSource cleanup:** close on `DONE` / `ERROR` client-side too.
 
-### Still pending — needs real credentials
+### Historical pending items — now resolved via USAA
 
-- Verify Geico full flow (post-MFA → docs page → PDF fetch) against a real account.
-- Measure live post-MFA latency (mock measured 813ms; real Playwright + Geico estimated 4–7s).
-- Loom recording (2–3 min): walk through code briefly, then a live run + a second run showing MFA-skip via stored session.
+- Geico full flow was superseded by USAA because the user supplied real USAA credentials.
+- Live post-MFA latency was measured on USAA at 6.34s.
+- A second USAA run verified MFA-skip via stored session.

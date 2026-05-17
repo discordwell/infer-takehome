@@ -44,7 +44,10 @@ Singleton that owns the Playwright + Chromium lifecycle. `new_context()` is an a
 `CarrierFlow` ABC with four hooks: `login`, `mfa_required`, `submit_mfa`, `is_authenticated`, `fetch_documents`. Orchestration is in `orchestrator.py`.
 
 ### `backend/carriers/geico.py`
-Geico-specific Playwright flow against `ecams.geico.com`. After auth, lifts `storage_state` cookies into `httpx` and fetches documents in parallel via `asyncio.gather` — much faster than DOM-walking.
+Geico-specific Playwright flow against `ecams.geico.com`. It remains wired as a secondary adapter and smoke-test target.
+
+### `backend/carriers/usaa.py`
+USAA-specific Playwright flow. USAA's Akamai edge rejects normal Playwright-launched Chromium, so this adapter uses installed Google Chrome over CDP. After MFA, it navigates directly to the document center, clicks the first document row, and races PDF response/download/popup signals so the first verified PDF is returned immediately.
 
 ### `backend/carriers/mock.py`
 Drop-in replacement for testing the stack without real credentials. Enable with `CARRIER_MOCK=1`. Used by the integration tests and lets reviewers exercise the full UI flow.
@@ -59,20 +62,20 @@ Five DOM states swapped by JS (form, waiting, MFA, docs, error). SSE via `EventS
 
 | Step | Estimate |
 |---|---|
-| MFA POST → background task fills code | 0.2s |
-| Playwright submits MFA, lands on dashboard | 1.5–2.5s |
-| Cookies → httpx, fetch doc index + PDFs in parallel | 1.5–3s |
+| MFA POST → background task fills code | ~0.3s |
+| USAA submits MFA and leaves challenge | ~1.7s |
+| Navigate to document center + capture first PDF | ~4.4s |
 | SSE event with doc list to client | 0.1s |
 | `<embed>` requests PDF bytes from in-memory cache | 0.5–1.5s |
-| **Total** | **~4–7s** |
+| **Measured USAA total** | **6.34s** |
 
-Target is < 8s; this fits with margin.
+Target is < 8s; the measured live USAA run fits with margin.
 
 ## Session reuse
 
 First run: full login + MFA. After success, persist `storage_state` to disk.
 
-Second run for the same `(carrier, username)`: open Playwright with stored state, navigate to the docs page. If we land there (not redirected to login), we skip MFA and complete in ~3–4s. If expired, fall back to fresh login.
+Second run for the same `(carrier, username)`: open Playwright with stored state, navigate to the docs page. If we land there (not redirected to login), we skip MFA and complete in ~4.81s on the latest USAA check. If expired, fall back to fresh login.
 
 ## Security caveats
 
@@ -80,19 +83,20 @@ Second run for the same `(carrier, username)`: open Playwright with stored state
 - Credentials live in memory only for the duration of the login flow — never persisted.
 - HTTPS termination is the deployer's problem; local demo runs on plain HTTP.
 
-## Carrier choice — why Geico
+## Carrier choice — why USAA
 
 Decision matrix (auto-insurance customer portals, US):
 
-- **Geico (chosen):** No detectable Akamai/PerimeterX on `ecams.geico.com`. SMS or email MFA. Single-step login. Documents 1–2 clicks from the dashboard. ~12% market share — credentials are findable.
-- **Progressive (contingency):** Comparable defenses, often device-trusts after first login (effectively skips MFA). ~17% share. Swap takes ~half a day via `CarrierFlow`.
+- **USAA (chosen and measured):** Real credentials were available from the user. The site is bot-sensitive, but installed Chrome over CDP reaches login. Email/SMS MFA works, the document center returns real policy PDFs, and session reuse was verified.
+- **Geico:** Wired as a secondary adapter. Lower bot friction than USAA, but this account was not the measured final path.
+- **Progressive (contingency):** Comparable flow shape, often device-trusts after first login. Swap takes ~half a day via `CarrierFlow`.
 - **Allstate:** Acceptable, less common.
-- **State Farm / USAA:** Avoided. State Farm leans authenticator-app; USAA is military-only.
+- **State Farm:** Less attractive for this take-home because it often leans authenticator-app.
 
 ## Out of scope
 
 - Multi-tenant credential isolation.
 - Concurrent users (the in-process manager assumes one user at a time).
-- Carriers beyond Geico (others stubbed in dropdown; abstraction is in place).
-- Bot-defense evasion beyond default Playwright + a reasonable UA.
+- Carriers beyond USAA/Geico (others stubbed in dropdown; abstraction is in place).
+- Bot-defense evasion beyond installed Chrome over CDP and a reasonable UA.
 - "Resend MFA code" flow if the user misses the 90s window.
