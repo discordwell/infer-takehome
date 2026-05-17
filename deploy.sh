@@ -11,7 +11,7 @@ echo ">> Checking SSH..."
 ssh -o ConnectTimeout=10 -o BatchMode=yes "${SSH_HOST}" "true"
 
 echo ">> Syncing to ${SSH_HOST}:${REMOTE_PATH}..."
-ssh "${SSH_HOST}" "mkdir -p ${REMOTE_PATH}"
+ssh "${SSH_HOST}" "sudo mkdir -p ${REMOTE_PATH} && sudo chown \$(id -un):\$(id -gn) ${REMOTE_PATH}"
 rsync -az --delete \
   --exclude='.git/' \
   --exclude='.venv/' \
