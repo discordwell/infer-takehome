@@ -104,6 +104,7 @@ class PlaywrightRunner:
         chrome = _chrome_binary()
         profile_dir = Path(chrome_profile_dir or "storage/browser-profiles/chrome")
         profile_dir.mkdir(parents=True, exist_ok=True)
+        _clear_stale_profile_locks(profile_dir)
         port = _free_port()
         chrome_args = [
             f"--remote-debugging-port={port}",
@@ -212,6 +213,44 @@ def _terminate_process_group(proc: subprocess.Popen) -> None:
     except subprocess.TimeoutExpired:
         proc.kill()
         proc.wait(timeout=5)
+
+
+def _clear_stale_profile_locks(profile_dir: Path) -> None:
+    """Remove Chrome profile lock files left by a previous crashed container."""
+    if _profile_has_live_chrome(profile_dir):
+        return
+    for name in ("SingletonLock", "SingletonSocket", "SingletonCookie"):
+        try:
+            (profile_dir / name).unlink()
+        except FileNotFoundError:
+            pass
+        except OSError as e:
+            log.warning("Could not remove stale Chrome profile lock %s: %s", name, e)
+
+
+def _profile_has_live_chrome(profile_dir: Path) -> bool:
+    if os.name != "posix" or not Path("/proc").exists():
+        return False
+    candidates = {str(profile_dir), str(profile_dir.resolve())}
+    try:
+        proc_dirs = list(Path("/proc").iterdir())
+    except OSError:
+        return False
+    for proc_dir in proc_dirs:
+        if not proc_dir.name.isdigit():
+            continue
+        try:
+            cmdline = (proc_dir / "cmdline").read_bytes()
+        except OSError:
+            continue
+        if not cmdline:
+            continue
+        command = cmdline.replace(b"\x00", b" ").decode(errors="ignore")
+        if "chrome" not in command.lower():
+            continue
+        if any(f"--user-data-dir={candidate}" in command for candidate in candidates):
+            return True
+    return False
 
 
 def _free_port() -> int:
