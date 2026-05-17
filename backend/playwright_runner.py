@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
+import shutil
 import socket
 import subprocess
 from pathlib import Path
@@ -98,19 +100,26 @@ class PlaywrightRunner:
         await self.start()
         assert self._pw is not None
 
-        chrome = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+        chrome = _chrome_binary()
         profile_dir = Path(chrome_profile_dir or "storage/browser-profiles/chrome")
         profile_dir.mkdir(parents=True, exist_ok=True)
         port = _free_port()
+        chrome_args = [
+            f"--remote-debugging-port={port}",
+            f"--user-data-dir={profile_dir}",
+            "--no-first-run",
+            "--no-default-browser-check",
+            "--disable-dev-shm-usage",
+        ]
+        if os.name == "posix" and hasattr(os, "geteuid") and os.geteuid() == 0:
+            chrome_args.append("--no-sandbox")
+        command = [chrome, *chrome_args, "about:blank"]
+        if not os.environ.get("DISPLAY") and os.name == "posix":
+            xvfb = shutil.which("xvfb-run")
+            if xvfb:
+                command = [xvfb, "-a", *command]
         proc = subprocess.Popen(
-            [
-                chrome,
-                f"--remote-debugging-port={port}",
-                f"--user-data-dir={profile_dir}",
-                "--no-first-run",
-                "--no-default-browser-check",
-                "about:blank",
-            ],
+            command,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
@@ -138,6 +147,30 @@ class PlaywrightRunner:
 
 
 runner = PlaywrightRunner()
+
+
+def _chrome_binary() -> str:
+    configured = os.environ.get("CHROME_BINARY")
+    if configured:
+        return configured
+
+    candidates = [
+        "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+        "/usr/bin/google-chrome-stable",
+        "/usr/bin/google-chrome",
+        "/usr/bin/chromium",
+        "/usr/bin/chromium-browser",
+    ]
+    for candidate in candidates:
+        if Path(candidate).exists():
+            return candidate
+
+    for name in ("google-chrome-stable", "google-chrome", "chromium", "chromium-browser"):
+        found = shutil.which(name)
+        if found:
+            return found
+
+    raise RuntimeError("Google Chrome or Chromium binary not found")
 
 
 def _free_port() -> int:
