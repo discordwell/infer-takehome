@@ -34,6 +34,7 @@ RUN apt-get update \
         libxfixes3 \
         libxkbcommon0 \
         libxrandr2 \
+        xauth \
         xdg-utils \
     && install -m 0755 -d /etc/apt/keyrings \
     && curl -fsSL https://dl.google.com/linux/linux_signing_key.pub \

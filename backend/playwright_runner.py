@@ -118,14 +118,25 @@ class PlaywrightRunner:
             xvfb = shutil.which("xvfb-run")
             if xvfb:
                 command = [xvfb, "-a", *command]
+        log_path = Path("/tmp") / f"chrome-cdp-{port}.log"
+        log_file = log_path.open("wb")
         proc = subprocess.Popen(
             command,
             stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            stderr=log_file,
         )
         browser = None
         try:
-            await _wait_for_port(port)
+            try:
+                await _wait_for_port(port)
+            except RuntimeError as e:
+                try:
+                    log_file.flush()
+                    chrome_log = log_path.read_text(errors="ignore").strip()
+                except Exception:
+                    chrome_log = ""
+                detail = f"{e}. Chrome stderr: {chrome_log[-1000:]}"
+                raise RuntimeError(detail) from e
             browser = await self._pw.chromium.connect_over_cdp(
                 f"http://127.0.0.1:{port}"
             )
@@ -134,6 +145,10 @@ class PlaywrightRunner:
                 await ctx.add_cookies(storage_state["cookies"])
             yield ctx
         finally:
+            try:
+                log_file.close()
+            except Exception:
+                pass
             if browser is not None:
                 try:
                     await browser.close()
