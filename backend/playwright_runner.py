@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import signal
 import shutil
 import socket
 import subprocess
@@ -124,6 +125,7 @@ class PlaywrightRunner:
             command,
             stdout=subprocess.DEVNULL,
             stderr=log_file,
+            start_new_session=(os.name == "posix"),
         )
         browser = None
         try:
@@ -154,11 +156,7 @@ class PlaywrightRunner:
                     await browser.close()
                 except Exception as e:  # noqa: BLE001
                     log.warning("Chrome CDP close failed: %s", e)
-            proc.terminate()
-            try:
-                proc.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                proc.kill()
+            _terminate_process_group(proc)
 
 
 runner = PlaywrightRunner()
@@ -186,6 +184,34 @@ def _chrome_binary() -> str:
             return found
 
     raise RuntimeError("Google Chrome or Chromium binary not found")
+
+
+def _terminate_process_group(proc: subprocess.Popen) -> None:
+    """Stop Chrome launched for CDP, including xvfb-run child processes."""
+    if proc.poll() is not None:
+        return
+    if os.name == "posix":
+        try:
+            os.killpg(proc.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            return
+        try:
+            proc.wait(timeout=5)
+            return
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                return
+            proc.wait(timeout=5)
+            return
+
+    proc.terminate()
+    try:
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait(timeout=5)
 
 
 def _free_port() -> int:
