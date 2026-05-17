@@ -77,6 +77,7 @@ class PlaywrightRunner:
             async with self._new_chrome_cdp_context(
                 chrome_profile_dir=chrome_profile_dir,
                 storage_state=storage_state,
+                context_options=overrides,
             ) as ctx:
                 yield ctx
             return
@@ -97,23 +98,39 @@ class PlaywrightRunner:
 
     @asynccontextmanager
     async def _new_chrome_cdp_context(
-        self, chrome_profile_dir: str | None, storage_state: dict | None
+        self,
+        chrome_profile_dir: str | None,
+        storage_state: dict | None,
+        context_options: dict | None = None,
     ):
         await self.start()
         assert self._pw is not None
 
+        context_options = context_options or {}
         chrome = _chrome_binary()
         profile_dir = Path(chrome_profile_dir or "storage/browser-profiles/chrome")
         profile_dir.mkdir(parents=True, exist_ok=True)
         _clear_stale_profile_locks(profile_dir)
         port = _free_port()
+        viewport = context_options.get("viewport") or {}
+        proxy = context_options.get("proxy") or {}
+        proxy_server = proxy.get("server") or os.environ.get("CHROME_PROXY_SERVER")
         chrome_args = [
             f"--remote-debugging-port={port}",
             f"--user-data-dir={profile_dir}",
             "--no-first-run",
             "--no-default-browser-check",
             "--disable-dev-shm-usage",
+            "--disable-blink-features=AutomationControlled",
         ]
+        if user_agent := context_options.get("user_agent"):
+            chrome_args.append(f"--user-agent={user_agent}")
+        if locale := context_options.get("locale"):
+            chrome_args.append(f"--lang={locale}")
+        if viewport.get("width") and viewport.get("height"):
+            chrome_args.append(f"--window-size={viewport['width']},{viewport['height']}")
+        if proxy_server:
+            chrome_args.append(f"--proxy-server={proxy_server}")
         if os.name == "posix" and hasattr(os, "geteuid") and os.geteuid() == 0:
             chrome_args.append("--no-sandbox")
         command = [chrome, *chrome_args, "about:blank"]
@@ -128,6 +145,7 @@ class PlaywrightRunner:
             stdout=subprocess.DEVNULL,
             stderr=log_file,
             start_new_session=(os.name == "posix"),
+            env=_chrome_env(context_options),
         )
         browser = None
         try:
@@ -145,6 +163,10 @@ class PlaywrightRunner:
                 f"http://127.0.0.1:{port}"
             )
             ctx = browser.contexts[0]
+            if headers := context_options.get("extra_http_headers"):
+                await ctx.set_extra_http_headers(headers)
+            if init_script := context_options.get("_init_script"):
+                await ctx.add_init_script(init_script)
             if storage_state and storage_state.get("cookies"):
                 await ctx.add_cookies(storage_state["cookies"])
             yield ctx
@@ -187,6 +209,13 @@ def _chrome_binary() -> str:
             return found
 
     raise RuntimeError("Google Chrome or Chromium binary not found")
+
+
+def _chrome_env(context_options: dict) -> dict[str, str]:
+    env = os.environ.copy()
+    if timezone_id := context_options.get("timezone_id"):
+        env["TZ"] = timezone_id
+    return env
 
 
 def _terminate_process_group(proc: subprocess.Popen) -> None:

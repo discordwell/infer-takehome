@@ -105,6 +105,7 @@ class UsaaFlow(CarrierFlow):
         return {
             "_launch_chrome_cdp": True,
             "_chrome_profile_dir": str(USAA_CHROME_PROFILE_DIR),
+            "_init_script": STEALTH_INIT_SCRIPT,
             "user_agent": USAA_USER_AGENT,
             "viewport": {"width": 1280, "height": 800},
             "locale": "en-US",
