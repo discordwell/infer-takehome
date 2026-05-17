@@ -7,6 +7,7 @@ import signal
 import shutil
 import socket
 import subprocess
+import time
 from pathlib import Path
 from contextlib import asynccontextmanager
 
@@ -158,7 +159,7 @@ class PlaywrightRunner:
                 except Exception as e:  # noqa: BLE001
                     log.warning("Chrome CDP close failed: %s", e)
             _terminate_process_group(proc)
-            _clear_stale_profile_locks(profile_dir)
+            _clear_stale_profile_locks(profile_dir, wait_for_processes=True)
 
 
 runner = PlaywrightRunner()
@@ -216,10 +217,15 @@ def _terminate_process_group(proc: subprocess.Popen) -> None:
         proc.wait(timeout=5)
 
 
-def _clear_stale_profile_locks(profile_dir: Path) -> None:
+def _clear_stale_profile_locks(
+    profile_dir: Path, wait_for_processes: bool = False
+) -> None:
     """Remove Chrome profile lock files left by a previous crashed container."""
-    if _profile_has_live_chrome(profile_dir):
-        return
+    deadline = time.monotonic() + 2.0
+    while _profile_has_live_chrome(profile_dir):
+        if not wait_for_processes or time.monotonic() >= deadline:
+            return
+        time.sleep(0.1)
     for name in ("SingletonLock", "SingletonSocket", "SingletonCookie"):
         try:
             (profile_dir / name).unlink()
