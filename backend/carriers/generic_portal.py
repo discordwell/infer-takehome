@@ -601,6 +601,32 @@ ALLSTATE_SPEC = GenericPortalSpec(
 )
 
 
+MERCURY_SPEC = GenericPortalSpec(
+    carrier=Carrier.MERCURY,
+    label="Mercury",
+    login_url="https://cp.mercuryinsurance.com/",
+    dashboard_urls=(
+        "https://cp.mercuryinsurance.com/",
+        "https://cp.mercuryinsurance.com/customer/",
+        "https://www.mercuryinsurance.com/myaccount/",
+    ),
+    document_urls=(
+        "https://cp.mercuryinsurance.com/",
+        "https://cp.mercuryinsurance.com/customer/",
+        "https://www.mercuryinsurance.com/myaccount/download-id-cards/",
+    ),
+    auth_phrases=(
+        "sign out",
+        "log out",
+        "policy information",
+        "policy documents",
+        "id cards",
+        "payment history",
+        "claims",
+    ),
+)
+
+
 class ProgressiveFlow(GenericPortalFlow):
     def __init__(self) -> None:
         super().__init__(PROGRESSIVE_SPEC)
@@ -614,3 +640,8 @@ class StateFarmFlow(GenericPortalFlow):
 class AllstateFlow(GenericPortalFlow):
     def __init__(self) -> None:
         super().__init__(ALLSTATE_SPEC)
+
+
+class MercuryFlow(GenericPortalFlow):
+    def __init__(self) -> None:
+        super().__init__(MERCURY_SPEC)

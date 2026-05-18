@@ -130,6 +130,11 @@ async def dev_credentials(request: Request) -> dict:
             "username": settings.state_farm_username,
             "password": settings.state_farm_password,
         }
+    if settings.mercury_username and settings.mercury_password:
+        creds[Carrier.MERCURY.value] = {
+            "username": settings.mercury_username,
+            "password": settings.mercury_password,
+        }
     return {"credentials": creds}
 
 

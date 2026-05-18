@@ -1,4 +1,8 @@
-from backend.carriers.generic_portal import GenericPortalFlow, PROGRESSIVE_SPEC
+from backend.carriers.generic_portal import (
+    GenericPortalFlow,
+    MERCURY_SPEC,
+    PROGRESSIVE_SPEC,
+)
 from backend.carriers.registry import supported_carriers
 from backend.models import Carrier
 
@@ -31,9 +35,15 @@ def test_experimental_carriers_are_registered():
         Carrier.PROGRESSIVE,
         Carrier.ALLSTATE,
         Carrier.STATE_FARM,
+        Carrier.MERCURY,
     }.issubset(set(supported_carriers()))
 
 
 def test_progressive_spec_has_login_and_document_urls():
     assert PROGRESSIVE_SPEC.login_url.startswith("https://")
     assert PROGRESSIVE_SPEC.document_urls
+
+
+def test_mercury_spec_points_at_customer_portal():
+    assert MERCURY_SPEC.login_url == "https://cp.mercuryinsurance.com/"
+    assert any("download-id-cards" in url for url in MERCURY_SPEC.document_urls)

@@ -20,6 +20,7 @@ class Carrier(str, Enum):
     PROGRESSIVE = "progressive"
     ALLSTATE = "allstate"
     STATE_FARM = "state_farm"
+    MERCURY = "mercury"
 
 
 class LoginRequest(BaseModel):

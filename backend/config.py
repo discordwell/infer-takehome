@@ -29,6 +29,8 @@ class Settings(BaseSettings):
     allstate_password: str | None = None
     state_farm_username: str | None = None
     state_farm_password: str | None = None
+    mercury_username: str | None = None
+    mercury_password: str | None = None
     usaa_username: str | None = None
     usaa_password: str | None = None
     usaa_mfa_email: str | None = None

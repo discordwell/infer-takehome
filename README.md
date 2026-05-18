@@ -10,7 +10,7 @@ Hosted demo: https://infer.discordwell.com
 
 - **Backend:** Python 3.11+ • FastAPI • Playwright (async) • httpx • Server-Sent Events
 - **Frontend:** vanilla HTML / CSS / JS (single file each, no build step)
-- **Active carriers:** USAA and Geico. Progressive / Allstate / State Farm have experimental generic adapters for credential-driven fallback validation.
+- **Active carriers:** USAA and Geico. Progressive / Allstate / State Farm / Mercury have experimental generic adapters for credential-driven fallback validation.
 
 ## Quickstart
 
@@ -29,7 +29,7 @@ For live carrier flows, fill `.env` first:
 cp .env.example .env
 # set credentials for the carrier you are testing, e.g.
 # USAA_USERNAME / USAA_PASSWORD, GEICO_USERNAME / GEICO_PASSWORD,
-# PROGRESSIVE_USERNAME / PROGRESSIVE_PASSWORD, etc.
+# MERCURY_USERNAME / MERCURY_PASSWORD, etc.
 ```
 
 ## Run modes
@@ -127,7 +127,7 @@ backend/
     base.py            # CarrierFlow ABC
     usaa.py            # USAA-specific Playwright flow
     geico.py           # Geico-specific Playwright flow
-    generic_portal.py  # experimental Progressive/State Farm/Allstate fallback
+    generic_portal.py  # experimental Progressive/State Farm/Allstate/Mercury fallback
     mock.py            # MockFlow for testing without creds
     registry.py        # carrier → flow lookup
 frontend/
@@ -187,13 +187,18 @@ Per the assignment, real credentials must come from someone with a personal-line
 ## Fallback carrier order
 
 If USAA remains blocked, validate the same UI/backend flow against carriers in
-this order:
+this order. Mercury moves to the front when those live credentials are
+available.
 
-1. **Geico** — adapter already exists; GEICO publicly documents online account,
+1. **Mercury** — public account pages advertise policy details, ID cards,
+   digital policy documents, and bills through the customer portal. The login
+   form has simple username/password fields, so it is a good live-credential
+   fallback when credentials are available.
+2. **Geico** — adapter already exists; GEICO publicly documents online account,
    policy document, and ID card access.
-2. **Progressive** — public docs say declarations pages are available through
+3. **Progressive** — public docs say declarations pages are available through
    online account/app.
-3. **State Farm** — public docs advertise policy documents and ID cards in the
+4. **State Farm** — public docs advertise policy documents and ID cards in the
    online account.
-4. **Allstate** — public docs confirm `Policies` -> `Documents`, but account
+5. **Allstate** — public docs confirm `Policies` -> `Documents`, but account
    behavior appears more brittle.

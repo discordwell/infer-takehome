@@ -5,7 +5,7 @@ import os
 from ..models import Carrier
 from .base import CarrierFlow
 from .geico import GeicoFlow
-from .generic_portal import AllstateFlow, ProgressiveFlow, StateFarmFlow
+from .generic_portal import AllstateFlow, MercuryFlow, ProgressiveFlow, StateFarmFlow
 from .mock import MockFlow
 from .usaa import UsaaFlow
 
@@ -18,6 +18,7 @@ def _build() -> dict[Carrier, CarrierFlow]:
             Carrier.PROGRESSIVE: MockFlow(Carrier.PROGRESSIVE),
             Carrier.ALLSTATE: MockFlow(Carrier.ALLSTATE),
             Carrier.STATE_FARM: MockFlow(Carrier.STATE_FARM),
+            Carrier.MERCURY: MockFlow(Carrier.MERCURY),
         }
     return {
         Carrier.GEICO: GeicoFlow(),
@@ -25,6 +26,7 @@ def _build() -> dict[Carrier, CarrierFlow]:
         Carrier.PROGRESSIVE: ProgressiveFlow(),
         Carrier.ALLSTATE: AllstateFlow(),
         Carrier.STATE_FARM: StateFarmFlow(),
+        Carrier.MERCURY: MercuryFlow(),
     }
 
 
