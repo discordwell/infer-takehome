@@ -1,6 +1,6 @@
 import httpx
 import pytest
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.responses import Response
 
 from backend.config import settings
@@ -59,6 +59,30 @@ async def test_worker_proxy_forwards_login_mfa_and_docs(monkeypatch):
     assert doc_response.body.startswith(b"%PDF")
     assert doc_response.headers["content-disposition"] == 'inline; filename="dec.pdf"'
     assert calls == [("login", "usaa"), ("mfa", "123456")]
+
+
+@pytest.mark.asyncio
+async def test_worker_proxy_login_transport_error_is_bad_gateway(monkeypatch):
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ReadError("connection reset", request=request)
+
+    proxy = WorkerProxy()
+    monkeypatch.setattr(settings, "usaa_worker_base_url", "http://worker")
+    monkeypatch.setattr(
+        proxy,
+        "_client",
+        lambda timeout: httpx.AsyncClient(
+            transport=httpx.MockTransport(handler),
+            base_url="http://worker",
+            timeout=timeout,
+        ),
+    )
+
+    with pytest.raises(HTTPException) as exc:
+        await proxy.login(LoginRequest(carrier=Carrier.USAA, username="u", password="p"))
+
+    assert exc.value.status_code == 502
+    assert "worker login failed" in exc.value.detail
 
 
 def test_terminal_sse_payload_detection():

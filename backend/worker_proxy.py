@@ -34,8 +34,16 @@ class WorkerProxy:
     async def login(self, req: LoginRequest) -> LoginResponse:
         self._prune_stale()
         local_session_id = uuid.uuid4().hex
-        async with self._client(timeout=60.0) as client:
-            resp = await client.post("/api/login", json=req.model_dump(mode="json"))
+        try:
+            async with self._client(timeout=60.0) as client:
+                resp = await client.post(
+                    "/api/login", json=req.model_dump(mode="json")
+                )
+        except httpx.HTTPError as e:
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail=f"worker login failed: {e}",
+            ) from e
         if resp.status_code >= 400:
             raise HTTPException(status_code=resp.status_code, detail=resp.text)
         remote_session_id = resp.json()["session_id"]
@@ -72,11 +80,17 @@ class WorkerProxy:
 
     async def submit_mfa(self, session_id: str, req: MfaRequest) -> dict[str, str]:
         worker_session = self._get(session_id)
-        async with self._client(timeout=30.0) as client:
-            resp = await client.post(
-                f"/api/mfa/{worker_session.remote_session_id}",
-                json=req.model_dump(mode="json"),
-            )
+        try:
+            async with self._client(timeout=30.0) as client:
+                resp = await client.post(
+                    f"/api/mfa/{worker_session.remote_session_id}",
+                    json=req.model_dump(mode="json"),
+                )
+        except httpx.HTTPError as e:
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail=f"worker MFA submit failed: {e}",
+            ) from e
         if resp.status_code == 404:
             raise HTTPException(status_code=404, detail="unknown session")
         if resp.status_code == 409:
@@ -87,10 +101,16 @@ class WorkerProxy:
 
     async def get_doc(self, session_id: str, doc_id: str) -> Response:
         worker_session = self._get(session_id)
-        async with self._client(timeout=60.0) as client:
-            resp = await client.get(
-                f"/api/docs/{worker_session.remote_session_id}/{doc_id}"
-            )
+        try:
+            async with self._client(timeout=60.0) as client:
+                resp = await client.get(
+                    f"/api/docs/{worker_session.remote_session_id}/{doc_id}"
+                )
+        except httpx.HTTPError as e:
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail=f"worker document fetch failed: {e}",
+            ) from e
         if resp.status_code == 404:
             raise HTTPException(status_code=404, detail="unknown doc")
         if resp.status_code >= 400:
