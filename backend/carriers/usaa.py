@@ -50,14 +50,14 @@ DOCUMENT_CENTER_URL_CANDIDATES = (
     "https://www.usaa.com/inet/wc/document_center",
 )
 POLICY_DOCUMENT_SEARCH_TERMS = (
+    "Renewal",
+    "Renew",
+    "Policy",
+    "Policy Packet",
     "Declarations",
     "Declaration",
     "Initial",
     "New Policy",
-    "Policy Packet",
-    "Renew",
-    "Renewal",
-    "Policy",
 )
 DEBUG_DIR = Path("/tmp")
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -1107,16 +1107,33 @@ class UsaaFlow(CarrierFlow):
             except Exception:
                 pass
 
-        try:
-            await page.wait_for_load_state("domcontentloaded", timeout=2500)
-        except Exception:
-            pass
-        try:
-            await page.locator("button[data-testid^='readDocument-']").first.wait_for(
-                state="visible", timeout=6000
-            )
-        except Exception:
-            await page.wait_for_timeout(800)
+        deadline = time.perf_counter() + 3.0
+        while time.perf_counter() < deadline:
+            try:
+                if (
+                    await page.locator(
+                        "button[data-testid^='readDocument-']:visible"
+                    ).count()
+                    > 0
+                ):
+                    return True
+            except Exception:
+                pass
+            try:
+                body = (await self._body_text(page, timeout_ms=300)).lower()
+                if any(
+                    phrase in body
+                    for phrase in (
+                        "search results: 0",
+                        "no documents",
+                        "no results",
+                        "didn't find any documents",
+                    )
+                ):
+                    return True
+            except Exception:
+                pass
+            await page.wait_for_timeout(150)
         return True
 
     async def _document_center_account_filter_values(self, page: Page) -> list[str]:
@@ -1376,6 +1393,19 @@ class UsaaFlow(CarrierFlow):
                 if not await self._wait_for_document_center_ready(page):
                     continue
 
+                docs, doc_bytes = await self._fetch_document_buttons(
+                    page,
+                    http,
+                    ctx,
+                    selected_policy_keys=selected_policy_keys,
+                    fallback_all=False,
+                    emit_progress=False,
+                )
+                await merge(docs, doc_bytes)
+                self.mark_timing("document_center_visible_docs_checked")
+                if len(selected_policy_keys) >= 2:
+                    return all_docs, all_doc_bytes
+
                 account_filter_values = (
                     await self._document_center_account_filter_values(page)
                 )
@@ -1383,7 +1413,20 @@ class UsaaFlow(CarrierFlow):
                     await self._widen_document_center_date_filter(
                         page, account_filter_value=account_filter_value
                     )
+                    docs, doc_bytes = await self._fetch_document_buttons(
+                        page,
+                        http,
+                        ctx,
+                        selected_policy_keys=selected_policy_keys,
+                        fallback_all=False,
+                        emit_progress=False,
+                    )
+                    await merge(docs, doc_bytes)
+                    if docs:
+                        continue
+
                     for term in POLICY_DOCUMENT_SEARCH_TERMS:
+                        before_keys = set(selected_policy_keys)
                         docs, doc_bytes = await self._fetch_document_search_results(
                             page,
                             http,
@@ -1392,11 +1435,14 @@ class UsaaFlow(CarrierFlow):
                             selected_policy_keys=selected_policy_keys,
                         )
                         await merge(docs, doc_bytes)
+                        if selected_policy_keys != before_keys:
+                            break
                 if all_docs:
                     return all_docs, all_doc_bytes
 
                 await self._widen_document_center_date_filter(page)
                 for term in POLICY_DOCUMENT_SEARCH_TERMS:
+                    before_keys = set(selected_policy_keys)
                     docs, doc_bytes = await self._fetch_document_search_results(
                         page,
                         http,
@@ -1405,6 +1451,8 @@ class UsaaFlow(CarrierFlow):
                         selected_policy_keys=selected_policy_keys,
                     )
                     await merge(docs, doc_bytes)
+                    if selected_policy_keys != before_keys:
+                        break
                 if all_docs:
                     return all_docs, all_doc_bytes
             except Exception as e:
