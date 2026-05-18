@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import logging
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from urllib.parse import unquote, urljoin
+from urllib.parse import unquote, urljoin, urlsplit
 
 import httpx
 from playwright.async_api import BrowserContext, Locator, Page
@@ -368,6 +369,8 @@ class GenericPortalFlow(CarrierFlow):
             href = urljoin(page.url, href or "")
             if not href or href in seen:
                 continue
+            if not self._is_http_url(href):
+                continue
             if doc_pattern.search(name) or doc_pattern.search(href):
                 seen.add(href)
                 candidates.append((name, href))
@@ -376,12 +379,26 @@ class GenericPortalFlow(CarrierFlow):
     async def _extract_document_from_page(
         self, page: Page, http: httpx.AsyncClient
     ) -> tuple[bytes | None, str]:
-        urls = await page.eval_on_selector_all(
-            "embed[src], iframe[src], object[data], a[href$='.pdf'], a[href*='.pdf?']",
+        urls: list[str] = []
+        if self._is_blob_url(page.url):
+            urls.append(page.url)
+        embedded_urls = await page.eval_on_selector_all(
+            (
+                "embed[src], iframe[src], object[data], "
+                "a[href^='blob:'], a[href$='.pdf'], a[href*='.pdf?']"
+            ),
             "els => els.map(e => e.src || e.data || e.href).filter(Boolean)",
         )
+        urls.extend(embedded_urls)
         for url in urls:
             url = urljoin(page.url, url)
+            if self._is_blob_url(url):
+                body, content_type = await self._fetch_blob_document(page, url)
+                if body is not None:
+                    return body, content_type
+                continue
+            if not self._is_http_url(url):
+                continue
             try:
                 r = await http.get(url)
                 content_type = r.headers.get("content-type", "application/pdf")
@@ -390,6 +407,37 @@ class GenericPortalFlow(CarrierFlow):
             except Exception:
                 continue
         return None, "application/pdf"
+
+    async def _fetch_blob_document(
+        self, page: Page, url: str
+    ) -> tuple[bytes | None, str]:
+        try:
+            result = await page.evaluate(
+                """async (url) => {
+                    const response = await fetch(url);
+                    const buffer = await response.arrayBuffer();
+                    const bytes = new Uint8Array(buffer);
+                    let binary = '';
+                    const chunkSize = 0x8000;
+                    for (let i = 0; i < bytes.length; i += chunkSize) {
+                        binary += String.fromCharCode(...bytes.subarray(i, i + chunkSize));
+                    }
+                    return {
+                        contentType: response.headers.get('content-type') || 'application/pdf',
+                        bodyBase64: btoa(binary)
+                    };
+                }""",
+                url,
+            )
+        except Exception as e:
+            log.warning("%s: failed to read blob document: %s", self.spec.label, e)
+            return None, "application/pdf"
+
+        body = base64.b64decode(result.get("bodyBase64", ""))
+        content_type = result.get("contentType") or "application/pdf"
+        if not self._is_document_body(body, content_type):
+            return None, content_type
+        return body, content_type
 
     async def _document_from_response(self, resp) -> tuple[bytes, str, str] | None:
         content_type = resp.headers.get("content-type", "application/pdf")
@@ -462,6 +510,14 @@ class GenericPortalFlow(CarrierFlow):
     def _is_login_url(self, url: str) -> bool:
         lowered = url.lower()
         return any(k in lowered for k in ("login", "signin", "sign-in", "logon"))
+
+    @staticmethod
+    def _is_http_url(url: str) -> bool:
+        return urlsplit(url).scheme in {"http", "https"}
+
+    @staticmethod
+    def _is_blob_url(url: str) -> bool:
+        return urlsplit(url).scheme == "blob"
 
     async def _body_text(self, page: Page, timeout_ms: int = 3000) -> str:
         try:
@@ -645,3 +701,110 @@ class AllstateFlow(GenericPortalFlow):
 class MercuryFlow(GenericPortalFlow):
     def __init__(self) -> None:
         super().__init__(MERCURY_SPEC)
+
+    async def fetch_documents(
+        self,
+        page: Page,
+        http: httpx.AsyncClient,
+        ctx: BrowserContext,
+    ) -> tuple[list[Document], dict[str, bytes]]:
+        await page.goto(
+            "https://cp.mercuryinsurance.com/customer/dashboard",
+            wait_until="domcontentloaded",
+            timeout=15000,
+        )
+        await self._settle(page, delay_ms=700, networkidle_timeout_ms=7000)
+
+        await self._dismiss_edelivery_overlay(page)
+        if "/customer/mydocuments" not in page.url:
+            if "/customer/policydetail" not in page.url:
+                await self._open_first_policy(page)
+            await self._open_document_history(page)
+
+        await self._expand_document_group(page)
+        docs, doc_bytes = await self._open_declarations_document(page, http, ctx)
+        if docs:
+            return docs, doc_bytes
+
+        await self._dump_debug(page, "mercury-docs-not-found")
+        raise RuntimeError("Mercury: no policy declaration document found")
+
+    async def _dismiss_edelivery_overlay(self, page: Page) -> None:
+        button = page.get_by_text(re.compile(r"continue\s+to\s+account\s+page", re.I))
+        if await button.count() == 0:
+            return
+        try:
+            await button.first.click(timeout=2500)
+            await self._settle(page, delay_ms=300, networkidle_timeout_ms=2500)
+        except Exception:
+            pass
+
+    async def _open_first_policy(self, page: Page) -> None:
+        target = await self._first_present(
+            page.locator("a[href*='/customer/policydetail']:visible").first,
+            page.locator("a[href*='policydetail']:visible").first,
+            page.locator("a.pleaseWait:visible").first,
+            timeout_ms=8000,
+        )
+        await target.click(timeout=5000)
+        await self._wait_for_mercury_url(page, "/customer/policydetail")
+
+    async def _open_document_history(self, page: Page) -> None:
+        more_actions = await self._first_present(
+            page.locator("div.moreActions:visible").first,
+            page.locator("[role='button']:visible", has_text="More Actions").first,
+            page.get_by_text(re.compile(r"more\s+actions", re.I)).first,
+            timeout_ms=8000,
+        )
+        await more_actions.click(timeout=5000)
+        history = await self._first_present(
+            page.locator("a[href*='/customer/mydocuments']:visible").first,
+            page.locator("a[href*='mydocuments']:visible").first,
+            page.get_by_text(re.compile(r"document\s+history", re.I)).first,
+            timeout_ms=8000,
+        )
+        await history.click(timeout=5000)
+        await self._wait_for_mercury_url(page, "/customer/mydocuments")
+
+    async def _expand_document_group(self, page: Page) -> None:
+        expander = await self._first_present(
+            page.locator("a[aria-label='View documents in group']:visible").first,
+            page.locator("a.document-drop-down:visible").first,
+            page.locator("[role='button']:visible", has_text="View").first,
+            timeout_ms=10000,
+        )
+        try:
+            await expander.click(timeout=5000)
+            await page.wait_for_timeout(300)
+        except Exception:
+            pass
+
+    async def _open_declarations_document(
+        self,
+        page: Page,
+        http: httpx.AsyncClient,
+        ctx: BrowserContext,
+    ) -> tuple[list[Document], dict[str, bytes]]:
+        target = await self._first_present(
+            page.get_by_text(
+                re.compile(r"auto\s+insurance\s+policy\s+declarations", re.I)
+            ).first,
+            page.get_by_text(re.compile(r"policy\s+declarations", re.I)).first,
+            page.locator("a:visible", has_text=re.compile(r"declarations", re.I)).first,
+            timeout_ms=10000,
+        )
+        try:
+            name = (await target.inner_text(timeout=1000)).strip()
+        except Exception:
+            name = "Auto Insurance Policy Declarations"
+        payload = await self._click_for_document(page, http, ctx, target, name)
+        if payload is None:
+            return [], {}
+        return self._single_document(*payload)
+
+    async def _wait_for_mercury_url(self, page: Page, fragment: str) -> None:
+        try:
+            await page.wait_for_url(f"**{fragment}**", timeout=10000)
+        except Exception:
+            pass
+        await self._settle(page, delay_ms=500, networkidle_timeout_ms=6000)

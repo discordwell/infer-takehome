@@ -47,3 +47,12 @@ def test_progressive_spec_has_login_and_document_urls():
 def test_mercury_spec_points_at_customer_portal():
     assert MERCURY_SPEC.login_url == "https://cp.mercuryinsurance.com/"
     assert any("download-id-cards" in url for url in MERCURY_SPEC.document_urls)
+
+
+def test_generic_url_scheme_helpers():
+    assert GenericPortalFlow._is_http_url("https://cp.mercuryinsurance.com/customer")
+    assert not GenericPortalFlow._is_http_url("javascript:void(0)")
+    assert GenericPortalFlow._is_blob_url(
+        "blob:https://cp.mercuryinsurance.com/7e556b3f"
+    )
+    assert not GenericPortalFlow._is_blob_url("https://cp.mercuryinsurance.com/")
