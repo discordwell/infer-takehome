@@ -7,6 +7,7 @@ import signal
 import shutil
 import socket
 import subprocess
+import sys
 import time
 from pathlib import Path
 from contextlib import asynccontextmanager
@@ -48,8 +49,9 @@ class PlaywrightRunner:
         await self.start()
         if self._browser is None:
             assert self._pw is not None
+            headless = _default_browser_headless()
             self._browser = await self._pw.chromium.launch(
-                headless=settings.playwright_headless,
+                headless=headless,
                 slow_mo=settings.playwright_slowmo_ms,
                 args=["--disable-blink-features=AutomationControlled"],
             )
@@ -207,6 +209,18 @@ class PlaywrightRunner:
 
 
 runner = PlaywrightRunner()
+
+
+def _default_browser_headless() -> bool:
+    if settings.playwright_headless:
+        return True
+    if os.name == "posix" and sys.platform != "darwin" and not os.environ.get("DISPLAY"):
+        log.warning(
+            "PLAYWRIGHT_HEADLESS=false but DISPLAY is unset; "
+            "forcing default browser to headless"
+        )
+        return True
+    return False
 
 
 def _chrome_binary() -> str:

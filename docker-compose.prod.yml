@@ -7,11 +7,13 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
     environment:
-      PLAYWRIGHT_HEADLESS: "false"
+      PLAYWRIGHT_HEADLESS: "${PLAYWRIGHT_HEADLESS:-true}"
       PLAYWRIGHT_SLOWMO_MS: "0"
       SESSION_TTL_SECONDS: "1800"
       CARRIER_MOCK: "${CARRIER_MOCK:-false}"
       USAA_MFA_EMAIL: "${USAA_MFA_EMAIL:-}"
+      WORKER_BASE_URL: "${WORKER_BASE_URL:-}"
+      WORKER_PROXY_CARRIERS: "${WORKER_PROXY_CARRIERS:-usaa}"
       USAA_WORKER_BASE_URL: "${USAA_WORKER_BASE_URL:-}"
       DEV_PREFILL_CREDS: "false"
       CHROME_BINARY: "/usr/bin/google-chrome-stable"
