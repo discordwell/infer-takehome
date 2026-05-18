@@ -99,6 +99,57 @@ def test_set_docs_transitions_to_done_and_publishes():
     assert mgr.get_doc_bytes(session.id, "d1") == b"%PDF-1.4"
 
 
+def test_publish_docs_progress_keeps_fetching_and_publishes():
+    mgr = SessionManager()
+    session = mgr.create(Carrier.USAA, "user")
+    queue = mgr.subscribe(session.id)
+    queue.get_nowait()
+    mgr.transition(session.id, SessionState.FETCHING_DOCS)
+    queue.get_nowait()
+
+    docs = [Document(id="d1", name="first.pdf", size_bytes=1024)]
+    timings = {"doc_pdf_bytes": 1234, "docs_progress_publish": 1300}
+    mgr.publish_docs_progress(
+        session.id, docs, {"d1": b"%PDF first"}, timings_ms=timings
+    )
+
+    evt = queue.get_nowait()
+    assert evt.event == "docs_ready"
+    assert evt.state == SessionState.FETCHING_DOCS
+    assert evt.docs == docs
+    assert evt.timings_ms == timings
+    assert mgr.get_doc_bytes(session.id, "d1") == b"%PDF first"
+
+
+def test_publish_docs_progress_ignores_regressions():
+    mgr = SessionManager()
+    session = mgr.create(Carrier.USAA, "user")
+    queue = mgr.subscribe(session.id)
+    queue.get_nowait()
+    mgr.transition(session.id, SessionState.FETCHING_DOCS)
+    queue.get_nowait()
+
+    docs = [
+        Document(id="d1", name="first.pdf", size_bytes=1024),
+        Document(id="d2", name="second.pdf", size_bytes=2048),
+    ]
+    mgr.publish_docs_progress(
+        session.id,
+        docs,
+        {"d1": b"%PDF first", "d2": b"%PDF second"},
+    )
+    queue.get_nowait()
+
+    mgr.publish_docs_progress(
+        session.id,
+        [docs[0]],
+        {"d1": b"%PDF first"},
+    )
+
+    assert queue.empty()
+    assert [d.id for d in mgr.get(session.id).docs] == ["d1", "d2"]
+
+
 def test_set_error_transitions_to_error_and_publishes():
     mgr = SessionManager()
     session = mgr.create(Carrier.GEICO, "user")

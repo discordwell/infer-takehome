@@ -91,6 +91,24 @@ class SessionManager:
         session.state = SessionState.DONE
         self._publish(session, event="docs_ready")
 
+    def publish_docs_progress(
+        self,
+        session_id: str,
+        docs: list[Document],
+        doc_bytes: dict[str, bytes],
+        *,
+        timings_ms: dict[str, int] | None = None,
+    ) -> None:
+        session = self.get(session_id)
+        if session.state in (SessionState.DONE, SessionState.ERROR):
+            return
+        if len(docs) < len(session.docs):
+            return
+        session.docs = list(docs)
+        session.doc_bytes = dict(doc_bytes)
+        session.timings_ms = timings_ms
+        self._publish(session, event="docs_ready")
+
     def set_error(self, session_id: str, error: str) -> None:
         session = self._sessions.get(session_id)
         if session is None:

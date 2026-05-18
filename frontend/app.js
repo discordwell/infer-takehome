@@ -75,9 +75,9 @@
         show("mfa");
       } else if (state === "AUTHENTICATING" || state === "FETCHING_DOCS" || state === "LOGGING_IN") {
         show("waiting");
-      } else if (state === "DONE") {
-        renderDocs(docs || [], timings_ms || null);
-        if (eventSource) { eventSource.close(); eventSource = null; }
+      } else if (docs && docs.length) {
+        renderDocs(docs, timings_ms || null, state === "DONE");
+        if (state === "DONE" && eventSource) { eventSource.close(); eventSource = null; }
       } else if (state === "ERROR") {
         showError(error || "Server error");
         if (eventSource) { eventSource.close(); eventSource = null; }
@@ -92,11 +92,11 @@
     });
   }
 
-  function renderDocs(docs, timingsMs) {
+  function renderDocs(docs, timingsMs, complete = true) {
     const list = document.getElementById("docs-list");
     list.innerHTML = "";
     document.getElementById("docs-summary").textContent =
-      `${docs.length} document${docs.length === 1 ? "" : "s"} retrieved.`;
+      `${docs.length} document${docs.length === 1 ? "" : "s"} retrieved${complete ? "." : "; still fetching."}`;
 
     const timingParts = [];
     const serverOrigin =
@@ -106,6 +106,9 @@
     }
     if (timingsMs && timingsMs.docs_ready_publish != null) {
       timingParts.push(`${serverOrigin} → all documents ready: ${timingsMs.docs_ready_publish} ms`);
+    }
+    if (!complete && timingsMs && timingsMs.docs_progress_publish != null) {
+      timingParts.push(`${serverOrigin} → first document visible: ${timingsMs.docs_progress_publish} ms`);
     }
     if (mfaStartTs != null) {
       const elapsedMs = Math.round(performance.now() - mfaStartTs);

@@ -10,7 +10,7 @@ import sys
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import AsyncIterator
+from typing import AsyncIterator, Awaitable, Callable
 
 import httpx
 from websockets.asyncio.client import connect as websocket_connect
@@ -85,6 +85,15 @@ class UsaaFlow(CarrierFlow):
     def __init__(self) -> None:
         self._timing_origin: float | None = None
         self._timings: list[tuple[str, float]] = []
+        self._documents_progress_callback: (
+            Callable[[list[Document], dict[str, bytes]], Awaitable[None]] | None
+        ) = None
+
+    def set_documents_progress_callback(
+        self,
+        callback: Callable[[list[Document], dict[str, bytes]], Awaitable[None]] | None,
+    ) -> None:
+        self._documents_progress_callback = callback
 
     def reset_timings(self) -> None:
         self._timing_origin = time.perf_counter()
@@ -208,7 +217,7 @@ class UsaaFlow(CarrierFlow):
             profile_dir,
             settings.usaa_os_login_timeout_seconds,
         )
-        await self._activate_chrome()
+        await self._activate_chrome(port)
         await self._wait_for_chrome_js(
             self._selector_exists_js("input[name='memberId'], input[type='text']"),
             timeout_ms=30000,
@@ -219,8 +228,7 @@ class UsaaFlow(CarrierFlow):
             "input[name='memberId'], input[type='text']", port
         )
         await self._replace_focused_text(username)
-        await self._focus_chrome_selector("#next-button, button[type='submit']", port)
-        await self._press_return()
+        await self._click_chrome_selector("#next-button, button[type='submit']", port)
         await self._dump_os_login_debug("after-username-submit", port)
 
         await self._wait_for_chrome_js(
@@ -234,18 +242,37 @@ class UsaaFlow(CarrierFlow):
         await self._replace_focused_text(password)
         await self._dump_os_login_debug("after-password-fill", port)
 
-        await self._focus_chrome_selector("#next-button, button[type='submit']", port)
-        await self._press_return()
+        await self._click_chrome_selector("#next-button, button[type='submit']", port)
         await self._wait_for_os_login_landing(port)
         await self._dump_os_login_debug("after-password-submit", port)
 
-    async def _activate_chrome(self) -> None:
-        await self._osascript(
+    async def _activate_chrome(self, port: int) -> None:
+        try:
+            await self._chrome_cdp_command(
+                "Page.bringToFront", timeout_ms=3000, port=port
+            )
+        except Exception as e:
+            log.debug("usaa: CDP Page.bringToFront failed before OS input: %s", e)
+
+        last_error: Exception | None = None
+        scripts = (
+            'tell application "Google Chrome" to activate',
             """
-            tell application "Google Chrome" to activate
+            tell application "System Events"
+                set frontmost of first process whose name is "Google Chrome" to true
+            end tell
             """,
-            timeout_ms=5000,
         )
+        for _ in range(8):
+            for script in scripts:
+                try:
+                    await self._osascript(script, timeout_ms=3000)
+                    return
+                except Exception as e:
+                    last_error = e
+            await asyncio.sleep(0.25)
+        assert last_error is not None
+        raise last_error
 
     async def _focus_chrome_selector(self, selector: str, port: int) -> None:
         selector_json = json.dumps(selector)
@@ -264,6 +291,38 @@ class UsaaFlow(CarrierFlow):
         )
         if focused.strip().lower() != "true":
             raise RuntimeError(f"USAA OS browser could not focus selector: {selector}")
+
+    async def _click_chrome_selector(self, selector: str, port: int) -> None:
+        selector_json = json.dumps(selector)
+        raw = await self._chrome_js(
+            f"""
+            (() => {{
+                const el = document.querySelector({selector_json});
+                if (!el) return null;
+                el.scrollIntoView({{ block: 'center', inline: 'center' }});
+                el.focus();
+                const rect = el.getBoundingClientRect();
+                const chromeLeft =
+                    window.screenX + ((window.outerWidth - window.innerWidth) / 2);
+                const chromeTop =
+                    window.screenY + (window.outerHeight - window.innerHeight);
+                return JSON.stringify({{
+                    x: Math.round(chromeLeft + rect.left + rect.width / 2),
+                    y: Math.round(chromeTop + rect.top + rect.height / 2),
+                }});
+            }})()
+            """,
+            timeout_ms=5000,
+            port=port,
+        )
+        if not raw:
+            raise RuntimeError(f"USAA OS browser could not locate selector: {selector}")
+        point = json.loads(raw)
+        await self._activate_chrome(port)
+        if shutil.which("cliclick"):
+            await self._cliclick(f"c:{int(point['x'])},{int(point['y'])}")
+        else:
+            await self._press_return()
 
     async def _replace_focused_text(self, value: str) -> None:
         await self._osascript(
@@ -327,6 +386,34 @@ class UsaaFlow(CarrierFlow):
             except Exception as e:
                 log.debug("usaa: OS-browser landing wait check failed: %s", e)
             await asyncio.sleep(0.5)
+        try:
+            state = await self._chrome_js(
+                """
+                (() => {
+                    const body = (document.body && document.body.innerText || '').toLowerCase();
+                    return JSON.stringify({
+                        url: location.href,
+                        hasPassword: !!document.querySelector("input[name='password'], input[type='password']"),
+                        body: body.slice(0, 400),
+                    });
+                })()
+                """,
+                timeout_ms=3000,
+                port=port,
+            )
+            parsed = json.loads(state)
+            if parsed.get("hasPassword"):
+                raise RuntimeError("USAA OS browser login did not leave password form")
+            raise RuntimeError(
+                "USAA OS browser login timed out after password submit: "
+                f"{parsed.get('url', '')}"
+            )
+        except RuntimeError:
+            raise
+        except Exception as e:
+            raise RuntimeError(
+                "USAA OS browser login timed out after password submit"
+            ) from e
 
     async def _dump_os_login_debug(self, label: str, port: int) -> None:
         png = DEBUG_DIR / f"usaa-os-login-{label}.png"
@@ -372,16 +459,19 @@ class UsaaFlow(CarrierFlow):
             message += f": {last_error}"
         raise RuntimeError(message)
 
-    async def _chrome_js(self, script: str, timeout_ms: int, port: int) -> str:
+    async def _chrome_cdp_command(
+        self,
+        method: str,
+        *,
+        timeout_ms: int,
+        port: int,
+        params: dict | None = None,
+    ) -> dict:
         ws_url = await self._cdp_page_ws_url(port, timeout_ms)
         message = {
             "id": 1,
-            "method": "Runtime.evaluate",
-            "params": {
-                "expression": script,
-                "awaitPromise": True,
-                "returnByValue": True,
-            },
+            "method": method,
+            "params": params or {},
         }
         async with websocket_connect(
             ws_url,
@@ -397,18 +487,46 @@ class UsaaFlow(CarrierFlow):
                 payload = json.loads(raw)
                 if payload.get("id") != 1:
                     continue
-                if "exceptionDetails" in payload:
-                    raise RuntimeError(
-                        f"Chrome JS failed: {payload['exceptionDetails']}"
-                    )
-                result = payload.get("result", {}).get("result", {})
-                value = result.get("value")
-                if value is None:
-                    return ""
-                if isinstance(value, str):
-                    return value
-                return json.dumps(value)
-        raise RuntimeError("Chrome JS did not return a response")
+                if "error" in payload:
+                    raise RuntimeError(f"Chrome CDP command failed: {payload['error']}")
+                return payload.get("result", {})
+        raise RuntimeError("Chrome CDP command did not return a response")
+
+    async def _chrome_js(self, script: str, timeout_ms: int, port: int) -> str:
+        result = await self._chrome_cdp_command(
+            "Runtime.evaluate",
+            timeout_ms=timeout_ms,
+            port=port,
+            params={
+                "expression": script,
+                "awaitPromise": True,
+                "returnByValue": True,
+            },
+        )
+        eval_result = result.get("result", {})
+        if "exceptionDetails" in result:
+            raise RuntimeError(f"Chrome JS failed: {result['exceptionDetails']}")
+        value = eval_result.get("value")
+        if value is None:
+            return ""
+        if isinstance(value, str):
+            return value
+        return json.dumps(value)
+
+    async def _cliclick(self, command: str) -> None:
+        proc = await asyncio.create_subprocess_exec(
+            "cliclick",
+            "-r",
+            command,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await proc.communicate()
+        if proc.returncode != 0:
+            detail = stderr.decode(errors="ignore").strip()
+            if not detail:
+                detail = stdout.decode(errors="ignore").strip()
+            raise RuntimeError(f"cliclick failed: {detail}")
 
     async def _cdp_page_ws_url(self, port: int, timeout_ms: int) -> str:
         async with httpx.AsyncClient(timeout=timeout_ms / 1000) as client:
@@ -618,6 +736,8 @@ class UsaaFlow(CarrierFlow):
 
         docs, doc_bytes = await self._fetch_from_document_surface(page, http, ctx)
         await merge(docs, doc_bytes)
+        if all_docs:
+            return all_docs, all_doc_bytes
 
         for url in DOCS_URL_CANDIDATES:
             try:
@@ -638,7 +758,7 @@ class UsaaFlow(CarrierFlow):
                                     ),
                                 )
                                 await merge(docs, doc_bytes)
-                                continue
+                                return all_docs, all_doc_bytes
                         except Exception:
                             pass
                 title = (await page.title()).lower()
@@ -651,6 +771,8 @@ class UsaaFlow(CarrierFlow):
                 continue
             docs, doc_bytes = await self._fetch_from_document_surface(page, http, ctx)
             await merge(docs, doc_bytes)
+            if all_docs:
+                return all_docs, all_doc_bytes
 
             candidates = await self._collect_document_links(page)
             if candidates:
@@ -659,6 +781,8 @@ class UsaaFlow(CarrierFlow):
                     http, candidates
                 )
                 await merge(docs, doc_bytes)
+                if all_docs:
+                    return all_docs, all_doc_bytes
 
         if all_docs:
             return all_docs, all_doc_bytes
@@ -783,6 +907,7 @@ class UsaaFlow(CarrierFlow):
                         self._merge_documents(
                             all_docs, all_doc_bytes, seen, docs, doc_bytes
                         )
+                        await self._emit_documents_progress(all_docs, all_doc_bytes)
                         continue
 
                 payload = await self._click_for_first_document(
@@ -796,6 +921,7 @@ class UsaaFlow(CarrierFlow):
                     self._merge_documents(
                         all_docs, all_doc_bytes, seen, docs, doc_bytes
                     )
+                    await self._emit_documents_progress(all_docs, all_doc_bytes)
             except Exception as e:
                 log.warning("usaa: document button %s failed: %s", idx, e)
         return all_docs, all_doc_bytes
@@ -833,9 +959,19 @@ class UsaaFlow(CarrierFlow):
                     self._merge_documents(
                         all_docs, all_doc_bytes, seen, docs, doc_bytes
                     )
+                    await self._emit_documents_progress(all_docs, all_doc_bytes)
             except Exception as e:
                 log.warning("usaa: document action %s failed: %s", pattern.pattern, e)
         return all_docs, all_doc_bytes
+
+    async def _emit_documents_progress(
+        self,
+        docs: list[Document],
+        doc_bytes: dict[str, bytes],
+    ) -> None:
+        if not docs or self._documents_progress_callback is None:
+            return
+        await self._documents_progress_callback(list(docs), dict(doc_bytes))
 
     async def _click_for_first_document(
         self,

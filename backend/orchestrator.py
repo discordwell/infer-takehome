@@ -154,7 +154,9 @@ async def _try_quick_path(
     try:
         if carrier == Carrier.USAA:
             try:
-                docs, doc_bytes = await flow.fetch_documents(page, http, ctx)
+                docs, doc_bytes = await _fetch_documents_with_progress(
+                    flow, page, http, ctx, manager, session_id
+                )
                 storage.save(carrier.value, username, await ctx.storage_state())
                 _mark_timing(flow, "docs_ready_publish")
                 manager.set_docs(
@@ -173,7 +175,9 @@ async def _try_quick_path(
             return False
         await http.aclose()
         http = await http_from_context(ctx, user_agent=context_options.get("user_agent"))
-        docs, doc_bytes = await flow.fetch_documents(page, http, ctx)
+        docs, doc_bytes = await _fetch_documents_with_progress(
+            flow, page, http, ctx, manager, session_id
+        )
         storage.save(carrier.value, username, await ctx.storage_state())
         _mark_timing(flow, "docs_ready_publish")
         manager.set_docs(
@@ -246,7 +250,9 @@ async def _finish_after_login(
     _mark_timing(flow, "fetching_docs_state")
     http = await http_from_context(ctx, user_agent=context_options.get("user_agent"))
     try:
-        docs, doc_bytes = await flow.fetch_documents(page, http, ctx)
+        docs, doc_bytes = await _fetch_documents_with_progress(
+            flow, page, http, ctx, manager, session_id
+        )
     finally:
         await http.aclose()
 
@@ -259,6 +265,37 @@ async def _finish_after_login(
         timings_ms=_timing_snapshot(flow),
     )
     _log_timing(flow, session_id)
+
+
+async def _fetch_documents_with_progress(
+    flow: CarrierFlow,
+    page,
+    http,
+    ctx,
+    manager: SessionManager,
+    session_id: str,
+):
+    setter = getattr(flow, "set_documents_progress_callback", None)
+    if not callable(setter):
+        return await flow.fetch_documents(page, http, ctx)
+
+    async def publish_progress(
+        docs,
+        doc_bytes,
+    ) -> None:
+        _mark_timing(flow, "docs_progress_publish")
+        manager.publish_docs_progress(
+            session_id,
+            docs,
+            doc_bytes,
+            timings_ms=_timing_snapshot(flow),
+        )
+
+    setter(publish_progress)
+    try:
+        return await flow.fetch_documents(page, http, ctx)
+    finally:
+        setter(None)
 
 
 def _reset_timing(flow: CarrierFlow) -> None:
