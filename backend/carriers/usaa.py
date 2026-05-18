@@ -31,6 +31,7 @@ DOCS_URL_CANDIDATES = (
         "?action=INIT&proofOfInsuranceType=IDCARD"
     ),
     "https://www.usaa.com/my/documents",
+    "https://www.usaa.com/my/documents?akredirect=true",
     "https://www.usaa.com/inet/wc/document_center",
     "https://www.usaa.com/my/insurance",
     "https://www.usaa.com/inet/wc/insurance_auto_main",
@@ -829,10 +830,19 @@ class UsaaFlow(CarrierFlow):
         links: list[tuple[str, str]] = await page.eval_on_selector_all(
             "a[href], button[data-href], [role='link'][href]",
             """els => els.map(e => {
+                const rects = e.getClientRects();
+                const style = window.getComputedStyle(e);
+                const visible = rects.length > 0
+                    && style.visibility !== 'hidden'
+                    && style.display !== 'none'
+                    && Number(style.opacity || '1') > 0;
+                const inChrome = !!e.closest(
+                    'header, footer, nav, .usaa-globalHeader, .usaa-globalFooterNav, .headerDropMenu'
+                );
                 const href = e.href || e.getAttribute('data-href') || '';
                 const text = (e.innerText || e.textContent || '').trim().slice(0, 120);
-                return [text || 'USAA document', href];
-            })""",
+                return { text: text || 'USAA document', href, visible, inChrome };
+            }).filter(e => e.visible && !e.inChrome).map(e => [e.text, e.href])""",
         )
         doc_pattern = re.compile(
             r"pdf|document|policy|declaration|id.?card|insurance.?card|proof",
