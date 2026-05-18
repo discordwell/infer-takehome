@@ -153,12 +153,7 @@ class UsaaFlow(CarrierFlow):
             await next_button.click()
             await self._settle(page, delay_ms=1000, networkidle_timeout_ms=3000)
 
-            pw_field = await self._first_present(
-                page.locator("input[name='password']:visible").first,
-                page.get_by_label(re.compile(r"Password", re.I)).first,
-                page.locator("input[type='password']:visible").first,
-                timeout_ms=45000,
-            )
+            pw_field = await self._wait_for_password_field(page)
             await self._slow_fill(pw_field, password)
 
             submit = await self._first_present(
@@ -762,6 +757,29 @@ class UsaaFlow(CarrierFlow):
             await loc.type(value, delay=35)
         except Exception:
             await loc.fill(value)
+
+    async def _wait_for_password_field(
+        self, page: Page, timeout_ms: int = 45000
+    ) -> Locator:
+        deadline = time.perf_counter() + (timeout_ms / 1000)
+        password_locators = (
+            page.locator("input[name='password']:visible").first,
+            page.get_by_label(re.compile(r"Password", re.I)).first,
+            page.locator("input[type='password']:visible").first,
+        )
+        while time.perf_counter() < deadline:
+            for locator in password_locators:
+                try:
+                    await locator.wait_for(state="visible", timeout=300)
+                    return locator
+                except Exception:
+                    pass
+            if await self._looks_blocked(page):
+                raise RuntimeError(
+                    "USAA blocked or returned unavailable after the Online ID step"
+                )
+            await page.wait_for_timeout(300)
+        raise RuntimeError("USAA password field did not appear after Online ID step")
 
     async def _body_text(self, page: Page, timeout_ms: int = 3000) -> str:
         try:
