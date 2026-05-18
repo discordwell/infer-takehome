@@ -174,3 +174,17 @@ Latest USAA local check: stored state skipped MFA and returned one PDF in ~4.81s
 ## Credentials sourcing
 
 Per the assignment, real credentials must come from someone with a personal-lines policy. This submission used a real USAA account supplied by the user, exercised the email/SMS MFA path, fetched a real PDF, and then verified session reuse on the next run. Geico remains wired as a secondary adapter, but USAA is the measured carrier for the take-home.
+
+## Fallback carrier order
+
+If USAA remains blocked, validate the same UI/backend flow against carriers in
+this order:
+
+1. **Geico** — adapter already exists; GEICO publicly documents online account,
+   policy document, and ID card access.
+2. **Progressive** — public docs say declarations pages are available through
+   online account/app.
+3. **State Farm** — public docs advertise policy documents and ID cards in the
+   online account.
+4. **Allstate** — public docs confirm `Policies` -> `Documents`, but account
+   behavior appears more brittle.
