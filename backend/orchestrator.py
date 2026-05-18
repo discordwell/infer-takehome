@@ -3,10 +3,10 @@ from __future__ import annotations
 import logging
 import time
 
-from .config import settings
 from . import storage
 from .carriers.base import CarrierFlow
 from .carriers.registry import get_flow
+from .config import settings
 from .models import Carrier, SessionState
 from .playwright_runner import http_from_context, runner
 from .session_manager import SessionManager
@@ -21,11 +21,7 @@ async def execute_login(
     username: str,
     password: str,
 ) -> None:
-    """Drive the full login → docs flow for one session.
-
-    Run as an asyncio background task. Publishes state via `manager`.
-    On exception, sets the session to ERROR; never raises.
-    """
+    """Drive the full login -> docs flow for one session."""
     try:
         flow = get_flow(carrier)
         stored_state = storage.load(carrier.value, username)
@@ -35,10 +31,10 @@ async def execute_login(
             stored_state = None
         context_options = flow.context_options()
 
-        async with runner.new_context(
-            storage_state=stored_state, **context_options
-        ) as ctx:
-            if stored_state is not None:
+        if stored_state is not None:
+            async with runner.new_context(
+                storage_state=stored_state, **context_options
+            ) as ctx:
                 if await _try_quick_path(
                     flow,
                     ctx,
@@ -50,19 +46,59 @@ async def execute_login(
                 ):
                     return
 
-            await _full_login(
+        await _run_full_login(
+            flow,
+            manager,
+            session_id,
+            carrier,
+            username,
+            password,
+            context_options,
+        )
+    except Exception as e:  # noqa: BLE001 - top of background task
+        log.exception("login flow failed for session %s", session_id)
+        manager.set_error(session_id, str(e) or e.__class__.__name__)
+
+
+async def _run_full_login(
+    flow: CarrierFlow,
+    manager: SessionManager,
+    session_id: str,
+    carrier: Carrier,
+    username: str,
+    password: str,
+    context_options: dict,
+) -> None:
+    login_context = getattr(flow, "login_context", None)
+    if callable(login_context):
+        manager.transition(session_id, SessionState.LOGGING_IN, detail="Logging in")
+        async with login_context(
+            runner, username, password, context_options
+        ) as login_result:
+            ctx, page = login_result
+            await _finish_after_login(
                 flow,
                 ctx,
+                page,
                 manager,
                 session_id,
                 carrier,
                 username,
-                password,
                 context_options,
             )
-    except Exception as e:  # noqa: BLE001 — top of background task
-        log.exception("login flow failed for session %s", session_id)
-        manager.set_error(session_id, str(e) or e.__class__.__name__)
+        return
+
+    async with runner.new_context(storage_state=None, **context_options) as ctx:
+        await _full_login(
+            flow,
+            ctx,
+            manager,
+            session_id,
+            carrier,
+            username,
+            password,
+            context_options,
+        )
 
 
 def _should_use_stored_state(
@@ -114,14 +150,11 @@ async def _try_quick_path(
     _reset_timing(flow)
     _mark_timing(flow, "quick_path_start")
     page = await ctx.new_page()
-    http = await http_from_context(
-        ctx, user_agent=context_options.get("user_agent")
-    )
+    http = await http_from_context(ctx, user_agent=context_options.get("user_agent"))
     try:
         if carrier == Carrier.USAA:
             try:
                 docs, doc_bytes = await flow.fetch_documents(page, http, ctx)
-                # refresh stored state in case carrier rotated cookies
                 storage.save(carrier.value, username, await ctx.storage_state())
                 _mark_timing(flow, "docs_ready_publish")
                 manager.set_docs(
@@ -139,11 +172,8 @@ async def _try_quick_path(
         if not authed:
             return False
         await http.aclose()
-        http = await http_from_context(
-            ctx, user_agent=context_options.get("user_agent")
-        )
+        http = await http_from_context(ctx, user_agent=context_options.get("user_agent"))
         docs, doc_bytes = await flow.fetch_documents(page, http, ctx)
-        # refresh stored state in case carrier rotated cookies
         storage.save(carrier.value, username, await ctx.storage_state())
         _mark_timing(flow, "docs_ready_publish")
         manager.set_docs(
@@ -176,7 +206,28 @@ async def _full_login(
     manager.transition(session_id, SessionState.LOGGING_IN, detail="Logging in")
     page = await ctx.new_page()
     await flow.login(page, username, password)
+    await _finish_after_login(
+        flow,
+        ctx,
+        page,
+        manager,
+        session_id,
+        carrier,
+        username,
+        context_options,
+    )
 
+
+async def _finish_after_login(
+    flow: CarrierFlow,
+    ctx,
+    page,
+    manager: SessionManager,
+    session_id: str,
+    carrier: Carrier,
+    username: str,
+    context_options: dict,
+) -> None:
     if await flow.mfa_required(page):
         code = await manager.request_mfa(
             session_id, timeout=settings.mfa_timeout_seconds

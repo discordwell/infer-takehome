@@ -54,7 +54,7 @@ MOCK_SKIP_MFA=1   CARRIER_MOCK=1 uv run uvicorn backend.main:app   # carrier-tru
 
 ### Live carrier mode
 
-With real credentials in `.env`, run plain `uvicorn` (no `CARRIER_MOCK`). USAA uses installed Google Chrome over CDP because USAA's Akamai edge blocks normal Playwright-launched Chromium before or during login. The first run does full login + email/phone MFA + doc fetch. The second run (same username) tries the stored `storage_state` quick path.
+With real credentials in `.env`, run plain `uvicorn` (no `CARRIER_MOCK`). USAA defaults to `USAA_LOGIN_DRIVER=os_browser`: the local worker launches real Chrome with a dedicated profile, uses macOS AppleScript/System Events for the sensitive username/password step, then attaches over CDP after login reaches MFA or an authenticated page. Set `USAA_LOGIN_DRIVER=playwright` to force the older all-Playwright path for debugging. The first run does full login + email/phone MFA + doc fetch. The second run (same username) tries the stored `storage_state` quick path.
 
 ### Hosted USAA worker mode
 
@@ -78,6 +78,10 @@ USAA_WORKER_BASE_URL=http://host.docker.internal:8041
 The frontend and public API do not change. The hosted app proxies USAA
 `/api/login`, `/api/status`, `/api/mfa`, and `/api/docs` calls to the local
 worker while other carriers still run normally on the hosted backend.
+
+For the default USAA OS-browser driver, the local macOS worker needs Chrome
+installed and Accessibility permission granted to the terminal/Codex app that
+runs `uvicorn`.
 
 ## Run flow
 
@@ -164,7 +168,7 @@ Latest USAA local check: stored state skipped MFA and returned one PDF in ~4.81s
 - **Session state on disk is unencrypted.** Demo only — prod should encrypt with an env-key or OS keychain. Trivial to add (~10 lines).
 - **Single-user in-process state.** The session manager assumes one user at a time. Concurrent users would need either a Redis-backed manager or process-per-user.
 - **MFA timeout is 90s.** If the user doesn't type the code in time, the session errors out. No "resend code" flow.
-- **USAA requires headed Chromium.** The adapter uses a Chrome-like context and debug dumps under `/tmp` when Akamai or the portal shape blocks progress.
+- **USAA requires headed Chrome.** The default adapter drives a visible local Chrome window for login and writes step screenshots/HTML under `/tmp` when Akamai or the portal shape blocks progress.
 - **HTTPS termination is the deployer's problem.** Local demo is plain HTTP.
 
 ## Credentials sourcing

@@ -2,11 +2,15 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import logging
 import re
 import shutil
+import sys
 import time
+from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import AsyncIterator
 
 import httpx
 from playwright.async_api import BrowserContext, Locator, Page
@@ -39,11 +43,9 @@ DOCS_URL_CANDIDATES = (
     "https://www.usaa.com/inet/wc/insurance_auto_main",
 )
 DEBUG_DIR = Path("/tmp")
+PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 USAA_CHROME_PROFILE_DIR = (
-    Path(__file__).resolve().parent.parent.parent
-    / "storage"
-    / "browser-profiles"
-    / "usaa-chrome"
+    PROJECT_ROOT / "storage" / "browser-profiles" / "usaa-chrome"
 )
 MFA_CODE_INPUT_SELECTOR = (
     "input[autocomplete='one-time-code']:visible, "
@@ -109,7 +111,7 @@ class UsaaFlow(CarrierFlow):
     def context_options(self) -> dict:
         return {
             "_launch_chrome_cdp": True,
-            "_chrome_profile_dir": str(USAA_CHROME_PROFILE_DIR),
+            "_chrome_profile_dir": str(self._chrome_profile_dir()),
             "_init_script": STEALTH_INIT_SCRIPT,
             "viewport": {"width": 1280, "height": 800},
             "locale": "en-US",
@@ -125,14 +127,15 @@ class UsaaFlow(CarrierFlow):
 
     def discard_stale_state(self, username: str) -> None:
         """Move the persistent Chrome profile aside before a fresh USAA login."""
-        if not USAA_CHROME_PROFILE_DIR.exists():
+        profile_dir = self._chrome_profile_dir()
+        if not profile_dir.exists():
             return
 
-        stale_dir = USAA_CHROME_PROFILE_DIR.parent / "stale"
+        stale_dir = profile_dir.parent / "stale"
         stale_dir.mkdir(parents=True, exist_ok=True)
-        destination = stale_dir / f"usaa-chrome-{int(time.time())}"
+        destination = stale_dir / f"{profile_dir.name}-{int(time.time())}"
         try:
-            shutil.move(str(USAA_CHROME_PROFILE_DIR), str(destination))
+            shutil.move(str(profile_dir), str(destination))
             log.info(
                 "usaa: moved stale Chrome profile for %s to %s",
                 username,
@@ -140,6 +143,272 @@ class UsaaFlow(CarrierFlow):
             )
         except Exception as e:  # noqa: BLE001
             log.warning("usaa: could not move stale Chrome profile: %s", e)
+
+    @asynccontextmanager
+    async def login_context(
+        self,
+        runner,
+        username: str,
+        password: str,
+        context_options: dict,
+    ) -> AsyncIterator[tuple[BrowserContext, Page]]:
+        if self._login_driver() != "os_browser":
+            async with runner.new_context(storage_state=None, **context_options) as ctx:
+                page = await ctx.new_page()
+                await self.login(page, username, password)
+                yield ctx, page
+            return
+
+        options = dict(context_options)
+        options.pop("_launch_chrome_cdp", None)
+        profile_dir = options.pop("_chrome_profile_dir", str(self._chrome_profile_dir()))
+        options["_initial_url"] = LOGIN_URL
+
+        async def before_connect(_port: int, launched_profile_dir: Path) -> None:
+            await self._os_browser_login(username, password, launched_profile_dir)
+
+        async with runner.new_chrome_cdp_context_after(
+            chrome_profile_dir=profile_dir,
+            storage_state=None,
+            context_options=options,
+            before_connect=before_connect,
+        ) as ctx:
+            page = ctx.pages[0] if ctx.pages else await ctx.new_page()
+            await page.wait_for_timeout(500)
+            if await self._page_has_unavailable_block(page):
+                await self._dump_debug(page, "os-login-blocked")
+                raise RuntimeError("USAA login blocked after password submit")
+            yield ctx, page
+
+    def _login_driver(self) -> str:
+        driver = settings.usaa_login_driver.strip().lower()
+        if driver not in {"os_browser", "playwright"}:
+            raise RuntimeError(
+                "USAA_LOGIN_DRIVER must be either 'os_browser' or 'playwright'"
+            )
+        return driver
+
+    def _chrome_profile_dir(self) -> Path:
+        if self._login_driver() == "os_browser":
+            configured = Path(settings.usaa_os_browser_profile_dir).expanduser()
+            if configured.is_absolute():
+                return configured
+            return PROJECT_ROOT / configured
+        return USAA_CHROME_PROFILE_DIR
+
+    async def _os_browser_login(
+        self, username: str, password: str, profile_dir: Path
+    ) -> None:
+        if sys.platform != "darwin":
+            raise RuntimeError("USAA OS browser login requires macOS local worker")
+
+        log.info(
+            "usaa: OS-browser login starting profile=%s timeout=%ss",
+            profile_dir,
+            settings.usaa_os_login_timeout_seconds,
+        )
+        await self._activate_chrome()
+        await self._wait_for_chrome_js(
+            self._selector_exists_js("input[name='memberId'], input[type='text']"),
+            timeout_ms=30000,
+        )
+
+        await self._focus_chrome_selector("input[name='memberId'], input[type='text']")
+        await self._replace_focused_text(username)
+        await self._focus_chrome_selector("#next-button, button[type='submit']")
+        await self._press_return()
+        await self._dump_os_login_debug("after-username-submit")
+
+        await self._wait_for_chrome_js(
+            self._selector_exists_js("input[name='password'], input[type='password']"),
+            timeout_ms=45000,
+        )
+        await self._focus_chrome_selector(
+            "input[name='password'], input[type='password']"
+        )
+        await self._replace_focused_text(password)
+        await self._dump_os_login_debug("after-password-fill")
+
+        await self._focus_chrome_selector("#next-button, button[type='submit']")
+        await self._press_return()
+        await self._wait_for_os_login_landing()
+        await self._dump_os_login_debug("after-password-submit")
+
+    async def _activate_chrome(self) -> None:
+        await self._osascript(
+            """
+            tell application "Google Chrome" to activate
+            """,
+            timeout_ms=5000,
+        )
+
+    async def _focus_chrome_selector(self, selector: str) -> None:
+        selector_json = json.dumps(selector)
+        focused = await self._chrome_js(
+            f"""
+            (() => {{
+                const el = document.querySelector({selector_json});
+                if (!el) return false;
+                el.focus();
+                if (el.select) el.select();
+                return document.activeElement === el;
+            }})()
+            """,
+            timeout_ms=5000,
+        )
+        if focused.strip().lower() != "true":
+            raise RuntimeError(f"USAA OS browser could not focus selector: {selector}")
+
+    async def _replace_focused_text(self, value: str) -> None:
+        await self._osascript(
+            f"""
+            tell application "System Events"
+                keystroke "a" using command down
+                keystroke {self._applescript_string(value)}
+            end tell
+            """,
+            timeout_ms=10000,
+        )
+
+    async def _press_return(self) -> None:
+        await self._osascript(
+            """
+            tell application "System Events"
+                key code 36
+            end tell
+            """,
+            timeout_ms=5000,
+        )
+
+    async def _wait_for_os_login_landing(self) -> None:
+        deadline = time.perf_counter() + settings.usaa_os_login_timeout_seconds
+        while time.perf_counter() < deadline:
+            try:
+                state = await self._chrome_js(
+                    """
+                    (() => {
+                        const body = (document.body && document.body.innerText || '').toLowerCase();
+                        const url = location.href.toLowerCase();
+                        const hasCode = !!document.querySelector(
+                            "input[autocomplete='one-time-code'], input[inputmode='numeric'], input[name*='code' i], input[id*='code' i]"
+                        );
+                        return JSON.stringify({ body, url, hasCode });
+                    })()
+                    """,
+                    timeout_ms=3000,
+                )
+                parsed = json.loads(state)
+                body = parsed.get("body", "")
+                url = parsed.get("url", "")
+                if self._is_unavailable_block_text(body):
+                    return
+                if parsed.get("hasCode") or any(
+                    phrase in body
+                    for phrase in (
+                        "verification code",
+                        "security code",
+                        "one-time code",
+                        "verify your identity",
+                    )
+                ):
+                    return
+                if "logon" not in url and any(
+                    phrase in body
+                    for phrase in ("log off", "sign out", "accounts", "policies")
+                ):
+                    return
+            except Exception as e:
+                log.debug("usaa: OS-browser landing wait check failed: %s", e)
+            await asyncio.sleep(0.5)
+
+    async def _dump_os_login_debug(self, label: str) -> None:
+        png = DEBUG_DIR / f"usaa-os-login-{label}.png"
+        html = DEBUG_DIR / f"usaa-os-login-{label}.html"
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "screencapture",
+                "-x",
+                str(png),
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=3)
+            except asyncio.TimeoutError:
+                proc.kill()
+        except Exception:
+            pass
+        try:
+            outer_html = await self._chrome_js(
+                "document.documentElement.outerHTML", timeout_ms=3000
+            )
+            html.write_text(self._sanitize_debug_html(outer_html))
+        except Exception:
+            pass
+        log.info("usaa: OS-browser login debug -> %s, %s", png, html)
+
+    async def _wait_for_chrome_js(self, script: str, timeout_ms: int) -> None:
+        deadline = time.perf_counter() + (timeout_ms / 1000)
+        last_error: Exception | None = None
+        while time.perf_counter() < deadline:
+            try:
+                result = await self._chrome_js(script, timeout_ms=3000)
+                if result.strip().lower() == "true":
+                    return
+            except Exception as e:
+                last_error = e
+            await asyncio.sleep(0.25)
+        message = "USAA OS browser login timed out waiting for page readiness"
+        if last_error is not None:
+            message += f": {last_error}"
+        raise RuntimeError(message)
+
+    async def _chrome_js(self, script: str, timeout_ms: int) -> str:
+        escaped = self._applescript_string(script)
+        return await self._osascript(
+            f"""
+            tell application "Google Chrome"
+                tell active tab of front window
+                    execute javascript {escaped}
+                end tell
+            end tell
+            """,
+            timeout_ms=timeout_ms,
+        )
+
+    async def _osascript(self, script: str, timeout_ms: int) -> str:
+        proc = await asyncio.create_subprocess_exec(
+            "osascript",
+            "-",
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        try:
+            stdout, stderr = await asyncio.wait_for(
+                proc.communicate(script.encode()), timeout=timeout_ms / 1000
+            )
+        except asyncio.TimeoutError:
+            proc.kill()
+            await proc.wait()
+            raise RuntimeError("AppleScript timed out")
+        if proc.returncode != 0:
+            detail = stderr.decode(errors="ignore").strip()
+            if "not authorized" in detail.lower() or "not allowed" in detail.lower():
+                detail += (
+                    " (grant Accessibility permission to the terminal/Codex app "
+                    "running the local worker)"
+                )
+            raise RuntimeError(f"AppleScript failed: {detail}")
+        return stdout.decode(errors="ignore").strip()
+
+    @staticmethod
+    def _selector_exists_js(selector: str) -> str:
+        return f"!!document.querySelector({json.dumps(selector)})"
+
+    @staticmethod
+    def _applescript_string(value: str) -> str:
+        return json.dumps(value)
 
     async def login(self, page: Page, username: str, password: str) -> None:
         await self._prepare_page(page)
@@ -1067,12 +1336,23 @@ class UsaaFlow(CarrierFlow):
             )
         )
 
+    async def _page_has_unavailable_block(self, page: Page) -> bool:
+        body = (await self._body_text(page)).lower()
+        return self._is_unavailable_block_text(body)
+
+    @staticmethod
+    def _is_unavailable_block_text(body: str) -> bool:
+        return (
+            "unable to complete your request" in body
+            and "system is currently unavailable" in body
+        )
+
     async def _dump_debug(self, page: Page, label: str) -> None:
         try:
             DEBUG_DIR.mkdir(exist_ok=True)
             png = DEBUG_DIR / f"usaa-{label}.png"
             html = DEBUG_DIR / f"usaa-{label}.html"
-            html.write_text(await page.content())
+            html.write_text(self._sanitize_debug_html(await page.content()))
             try:
                 await page.screenshot(path=str(png), full_page=True, timeout=5000)
             except Exception as e:
@@ -1080,6 +1360,21 @@ class UsaaFlow(CarrierFlow):
             log.warning("usaa debug dump -> %s, %s", png, html)
         except Exception as e:
             log.warning("usaa: failed to dump debug artifacts: %s", e)
+
+    @staticmethod
+    def _sanitize_debug_html(html: str) -> str:
+        def redact_input(match: re.Match) -> str:
+            tag = match.group(0)
+            if "password" not in tag.lower():
+                return tag
+            return re.sub(
+                r"value=(['\"])(.*?)\1",
+                r"value=\1[redacted]\1",
+                tag,
+                flags=re.I,
+            )
+
+        return re.sub(r"<input\b[^>]*>", redact_input, html, flags=re.I)
 
     @staticmethod
     async def _first_present(*locators: Locator, timeout_ms: int = 7000) -> Locator:

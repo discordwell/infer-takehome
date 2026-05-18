@@ -1,5 +1,6 @@
 from backend.carriers import usaa
 from backend.carriers.usaa import UsaaFlow
+from backend.config import settings
 
 
 def test_usaa_document_body_validation():
@@ -67,6 +68,7 @@ def test_usaa_discard_stale_state_moves_profile(tmp_path, monkeypatch):
     profile.mkdir()
     (profile / "Preferences").write_text("{}")
     monkeypatch.setattr(usaa, "USAA_CHROME_PROFILE_DIR", profile)
+    monkeypatch.setattr(settings, "usaa_login_driver", "playwright")
     monkeypatch.setattr(usaa.time, "time", lambda: 12345)
 
     UsaaFlow().discard_stale_state("u")
@@ -74,3 +76,58 @@ def test_usaa_discard_stale_state_moves_profile(tmp_path, monkeypatch):
     moved = tmp_path / "stale" / "usaa-chrome-12345"
     assert not profile.exists()
     assert (moved / "Preferences").read_text() == "{}"
+
+
+def test_usaa_context_options_default_to_os_browser_profile(tmp_path, monkeypatch):
+    profile = tmp_path / "os-profile"
+    monkeypatch.setattr(settings, "usaa_login_driver", "os_browser")
+    monkeypatch.setattr(settings, "usaa_os_browser_profile_dir", str(profile))
+
+    options = UsaaFlow().context_options()
+
+    assert options["_launch_chrome_cdp"] is True
+    assert options["_chrome_profile_dir"] == str(profile)
+
+
+def test_usaa_context_options_can_use_playwright_profile(tmp_path, monkeypatch):
+    profile = tmp_path / "usaa-cdp"
+    monkeypatch.setattr(settings, "usaa_login_driver", "playwright")
+    monkeypatch.setattr(usaa, "USAA_CHROME_PROFILE_DIR", profile)
+
+    options = UsaaFlow().context_options()
+
+    assert options["_chrome_profile_dir"] == str(profile)
+
+
+def test_usaa_invalid_login_driver_rejected(monkeypatch):
+    monkeypatch.setattr(settings, "usaa_login_driver", "bogus")
+
+    try:
+        UsaaFlow().context_options()
+    except RuntimeError as e:
+        assert "USAA_LOGIN_DRIVER" in str(e)
+    else:
+        raise AssertionError("invalid driver should raise")
+
+
+def test_usaa_unavailable_block_detection():
+    body = (
+        "We are unable to complete your request. "
+        "Our system is currently unavailable. Please try again later."
+    ).lower()
+
+    assert UsaaFlow._is_unavailable_block_text(body)
+    assert not UsaaFlow._is_unavailable_block_text("password mismatch")
+
+
+def test_usaa_debug_html_redacts_password_values():
+    html = (
+        '<input name="memberId" value="cordwell">'
+        '<input name="password" type="password" value="secret">'
+    )
+
+    sanitized = UsaaFlow._sanitize_debug_html(html)
+
+    assert 'value="cordwell"' in sanitized
+    assert "secret" not in sanitized
+    assert 'value="[redacted]"' in sanitized

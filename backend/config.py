@@ -9,6 +9,9 @@ class Settings(BaseSettings):
     session_ttl_seconds: int = 1800
     mfa_timeout_seconds: int = 300
     usaa_quick_path_max_age_seconds: int = 300
+    usaa_login_driver: str = "os_browser"
+    usaa_os_browser_profile_dir: str = "storage/browser-profiles/usaa-os-browser"
+    usaa_os_login_timeout_seconds: int = 90
     carrier_mock: bool = False
     mock_bad_password: bool = False
     mock_bad_mfa: bool = False

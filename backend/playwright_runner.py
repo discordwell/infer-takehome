@@ -10,6 +10,7 @@ import subprocess
 import time
 from pathlib import Path
 from contextlib import asynccontextmanager
+from collections.abc import Awaitable, Callable
 
 import httpx
 from playwright.async_api import (
@@ -102,11 +103,13 @@ class PlaywrightRunner:
         chrome_profile_dir: str | None,
         storage_state: dict | None,
         context_options: dict | None = None,
+        before_connect: Callable[[int, Path], Awaitable[None]] | None = None,
     ):
         await self.start()
         assert self._pw is not None
 
         context_options = context_options or {}
+        initial_url = context_options.pop("_initial_url", "about:blank")
         chrome = _chrome_binary()
         profile_dir = Path(chrome_profile_dir or "storage/browser-profiles/chrome")
         profile_dir.mkdir(parents=True, exist_ok=True)
@@ -133,7 +136,7 @@ class PlaywrightRunner:
             chrome_args.append(f"--proxy-server={proxy_server}")
         if os.name == "posix" and hasattr(os, "geteuid") and os.geteuid() == 0:
             chrome_args.append("--no-sandbox")
-        command = [chrome, *chrome_args, "about:blank"]
+        command = [chrome, *chrome_args, initial_url]
         if not os.environ.get("DISPLAY") and os.name == "posix":
             xvfb = shutil.which("xvfb-run")
             if xvfb:
@@ -159,6 +162,8 @@ class PlaywrightRunner:
                     chrome_log = ""
                 detail = f"{e}. Chrome stderr: {chrome_log[-1000:]}"
                 raise RuntimeError(detail) from e
+            if before_connect is not None:
+                await before_connect(port, profile_dir)
             browser = await self._pw.chromium.connect_over_cdp(
                 f"http://127.0.0.1:{port}"
             )
@@ -182,6 +187,23 @@ class PlaywrightRunner:
                     log.warning("Chrome CDP close failed: %s", e)
             _terminate_process_group(proc)
             _clear_stale_profile_locks(profile_dir, wait_for_processes=True)
+
+    @asynccontextmanager
+    async def new_chrome_cdp_context_after(
+        self,
+        *,
+        chrome_profile_dir: str | None,
+        storage_state: dict | None,
+        context_options: dict | None,
+        before_connect: Callable[[int, Path], Awaitable[None]],
+    ):
+        async with self._new_chrome_cdp_context(
+            chrome_profile_dir=chrome_profile_dir,
+            storage_state=storage_state,
+            context_options=context_options,
+            before_connect=before_connect,
+        ) as ctx:
+            yield ctx
 
 
 runner = PlaywrightRunner()
