@@ -19,6 +19,7 @@ class Settings(BaseSettings):
     usaa_username: str | None = None
     usaa_password: str | None = None
     usaa_mfa_email: str | None = None
+    usaa_worker_base_url: str | None = None
     dev_prefill_creds: bool = False
 
 

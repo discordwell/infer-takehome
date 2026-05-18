@@ -4,12 +4,15 @@ services:
     init: true
     ports:
       - "127.0.0.1:8310:8000"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     environment:
       PLAYWRIGHT_HEADLESS: "false"
       PLAYWRIGHT_SLOWMO_MS: "0"
       SESSION_TTL_SECONDS: "1800"
       CARRIER_MOCK: "${CARRIER_MOCK:-false}"
       USAA_MFA_EMAIL: "${USAA_MFA_EMAIL:-}"
+      USAA_WORKER_BASE_URL: "${USAA_WORKER_BASE_URL:-}"
       DEV_PREFILL_CREDS: "false"
       CHROME_BINARY: "/usr/bin/google-chrome-stable"
     volumes:

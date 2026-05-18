@@ -56,6 +56,29 @@ MOCK_SKIP_MFA=1   CARRIER_MOCK=1 uv run uvicorn backend.main:app   # carrier-tru
 
 With real credentials in `.env`, run plain `uvicorn` (no `CARRIER_MOCK`). USAA uses installed Google Chrome over CDP because USAA's Akamai edge blocks normal Playwright-launched Chromium before or during login. The first run does full login + email/phone MFA + doc fetch. The second run (same username) tries the stored `storage_state` quick path.
 
+### Hosted USAA worker mode
+
+If USAA rejects the hosted server before MFA, keep the public app hosted and run
+the carrier automation on a trusted local machine:
+
+```bash
+# local/residential worker
+uv run uvicorn backend.main:app --host 127.0.0.1 --port 8040
+
+# separate terminal: expose only that worker to the hosted server
+ssh -N -R 127.0.0.1:8041:127.0.0.1:8040 ovh2
+```
+
+Then set this on the hosted app:
+
+```bash
+USAA_WORKER_BASE_URL=http://host.docker.internal:8041
+```
+
+The frontend and public API do not change. The hosted app proxies USAA
+`/api/login`, `/api/status`, `/api/mfa`, and `/api/docs` calls to the local
+worker while other carriers still run normally on the hosted backend.
+
 ## Run flow
 
 1. Pick a carrier from the dropdown.
