@@ -25,7 +25,7 @@ The important backend contract is stable:
 
 - **Mercury:** working live path. The app expands Document History groups, selects the visible `Auto Insurance Policy Declarations` row, captures Mercury's `Document/V1` PDF payload, and renders the declarations PDF.
 - **USAA:** implemented, but bot-sensitive. Hosted USAA is proxied to a trusted local worker because login is more reliable from a real local Chrome profile. The document fetcher opens Document Center, widens the date range, filters each policy account, and returns the latest policy packet/renewal per policy type while ignoring billing statements.
-- **Geico:** adapter exists as a secondary fallback.
+- **Geico:** experimental adapter exists as a secondary fallback.
 - **Progressive, Allstate, State Farm:** experimental generic adapters.
 - **Mock mode:** deterministic no-credentials path for local review and tests.
 
@@ -219,7 +219,7 @@ backend/
   playwright_runner.py shared Playwright/Chrome lifecycle
   carriers/
     usaa.py            USAA-specific flow
-    geico.py           Geico-specific flow
+    geico.py           Experimental Geico-specific flow
     generic_portal.py  Mercury and other generic carrier flows
     mock.py            no-credentials mock carrier
 frontend/
