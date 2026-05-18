@@ -805,21 +805,82 @@ class MercuryFlow(GenericPortalFlow):
         http: httpx.AsyncClient,
         ctx: BrowserContext,
     ) -> tuple[list[Document], dict[str, bytes]]:
-        target_idx = await self._declarations_anchor_index(page)
-        if target_idx is None:
+        candidate_indices = await self._declarations_anchor_indices(page)
+        preferred_idx = await self._preferred_declarations_anchor_index(page)
+        if preferred_idx is not None:
+            candidate_indices = [
+                preferred_idx,
+                *[idx for idx in candidate_indices if idx != preferred_idx],
+            ]
+        if not candidate_indices:
             await self._dump_mercury_document_links(page)
             raise RuntimeError("Mercury: declaration link not found")
 
-        target = page.locator("a").nth(target_idx)
-        name = await self._anchor_text(page, target_idx)
-        if not name:
-            name = "Auto Insurance Policy Declarations"
-        payload = await self._click_for_document(page, http, ctx, target, name)
-        if payload is None:
-            return [], {}
-        return self._single_document(*payload)
+        fallback_payload: tuple[bytes, str, str] | None = None
+        for target_idx in candidate_indices:
+            target = page.locator("a").nth(target_idx)
+            name = await self._anchor_text(page, target_idx)
+            if not name:
+                name = "Auto Insurance Policy Declarations"
+            payload = await self._click_for_document(page, http, ctx, target, name)
+            if payload is None:
+                continue
+            body, content_type, filename = payload
+            if fallback_payload is None:
+                fallback_payload = payload
+            if len(body) <= 750_000:
+                return self._single_document(body, content_type, filename)
+            log.info(
+                "Mercury declaration candidate %s yielded large PDF (%d bytes); "
+                "trying next declaration candidate",
+                target_idx,
+                len(body),
+            )
+            await self._return_to_documents_page(page)
+
+        if fallback_payload is not None:
+            return self._single_document(*fallback_payload)
+        return [], {}
+
+    async def _preferred_declarations_anchor_index(self, page: Page) -> int | None:
+        matches = await page.eval_on_selector_all(
+            "#doc-counter-version section:first-of-type "
+            "div.documents-container p.group-document a.desktop",
+            """els => els.map(el => {
+                const allAnchors = Array.from(document.querySelectorAll('a'));
+                const text = (el.innerText || el.textContent || '')
+                    .replace(/\\s+/g, ' ')
+                    .trim();
+                const rects = el.getClientRects();
+                const style = window.getComputedStyle(el);
+                const visible = rects.length > 0
+                    && style.visibility !== 'hidden'
+                    && style.display !== 'none'
+                    && Number(style.opacity || '1') > 0;
+                return {
+                    index: allAnchors.indexOf(el),
+                    text,
+                    visible,
+                    pathText: (el.closest('p.group-document')?.innerText || '')
+                        .replace(/\\s+/g, ' ')
+                        .trim()
+                };
+            }).filter(item =>
+                item.index >= 0
+                && item.visible
+                && /auto\\s+insurance\\s+policy\\s+declarations/i.test(item.text)
+            )""",
+        )
+        if not matches:
+            return None
+        log.info("Mercury preferred declaration candidates: %s", matches)
+        return int(matches[0]["index"])
 
     async def _declarations_anchor_index(self, page: Page) -> int | None:
+        indices = await self._declarations_anchor_indices(page)
+        return indices[0] if indices else None
+
+    async def _declarations_anchor_indices(self, page: Page) -> list[int]:
         matches = await page.eval_on_selector_all(
             "a",
             """els => els.map((el, index) => {
@@ -836,7 +897,7 @@ class MercuryFlow(GenericPortalFlow):
             }).filter(item => /declarations?/i.test(item.text))""",
         )
         if not matches:
-            return None
+            return []
 
         def score(item: dict) -> tuple[int, int]:
             text = item["text"].lower()
@@ -853,10 +914,16 @@ class MercuryFlow(GenericPortalFlow):
                 value -= 20
             return value, -int(item["index"])
 
-        best = max(matches, key=score)
-        if score(best)[0] <= 0:
-            return None
-        return int(best["index"])
+        ordered = sorted(matches, key=score, reverse=True)
+        return [int(item["index"]) for item in ordered if score(item)[0] > 0]
+
+    async def _return_to_documents_page(self, page: Page) -> None:
+        try:
+            if not page.is_closed() and "/customer/mydocuments" not in page.url:
+                await page.go_back(wait_until="domcontentloaded", timeout=5000)
+                await self._wait_for_mercury_url(page, "/customer/mydocuments")
+        except Exception:
+            pass
 
     async def _anchor_text(self, page: Page, index: int) -> str:
         try:
