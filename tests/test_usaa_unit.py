@@ -1,3 +1,4 @@
+from backend.carriers import usaa
 from backend.carriers.usaa import UsaaFlow
 
 
@@ -59,3 +60,17 @@ def test_usaa_timing_snapshot_uses_first_label_occurrence():
         "doc_pdf_bytes": 1234,
         "docs_ready_publish": 2500,
     }
+
+
+def test_usaa_discard_stale_state_moves_profile(tmp_path, monkeypatch):
+    profile = tmp_path / "usaa-chrome"
+    profile.mkdir()
+    (profile / "Preferences").write_text("{}")
+    monkeypatch.setattr(usaa, "USAA_CHROME_PROFILE_DIR", profile)
+    monkeypatch.setattr(usaa.time, "time", lambda: 12345)
+
+    UsaaFlow().discard_stale_state("u")
+
+    moved = tmp_path / "stale" / "usaa-chrome-12345"
+    assert not profile.exists()
+    assert (moved / "Preferences").read_text() == "{}"

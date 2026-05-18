@@ -39,3 +39,15 @@ def test_should_use_stored_state_rejects_usaa_without_timestamp(monkeypatch):
     assert not orchestrator._should_use_stored_state(
         Carrier.USAA, "u", {"cookies": [], "origins": []}
     )
+
+
+def test_discard_stale_carrier_state_uses_optional_hook():
+    calls = []
+
+    class Flow:
+        def discard_stale_state(self, username):
+            calls.append(username)
+
+    orchestrator._discard_stale_carrier_state(Flow(), "u")
+
+    assert calls == ["u"]

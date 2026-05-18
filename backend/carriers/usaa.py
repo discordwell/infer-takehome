@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import logging
 import re
+import shutil
 import time
 from pathlib import Path
 
@@ -121,6 +122,24 @@ class UsaaFlow(CarrierFlow):
                 ),
             },
         }
+
+    def discard_stale_state(self, username: str) -> None:
+        """Move the persistent Chrome profile aside before a fresh USAA login."""
+        if not USAA_CHROME_PROFILE_DIR.exists():
+            return
+
+        stale_dir = USAA_CHROME_PROFILE_DIR.parent / "stale"
+        stale_dir.mkdir(parents=True, exist_ok=True)
+        destination = stale_dir / f"usaa-chrome-{int(time.time())}"
+        try:
+            shutil.move(str(USAA_CHROME_PROFILE_DIR), str(destination))
+            log.info(
+                "usaa: moved stale Chrome profile for %s to %s",
+                username,
+                destination,
+            )
+        except Exception as e:  # noqa: BLE001
+            log.warning("usaa: could not move stale Chrome profile: %s", e)
 
     async def login(self, page: Page, username: str, password: str) -> None:
         await self._prepare_page(page)

@@ -30,6 +30,8 @@ async def execute_login(
         flow = get_flow(carrier)
         stored_state = storage.load(carrier.value, username)
         if not _should_use_stored_state(carrier, username, stored_state):
+            if stored_state is not None:
+                _discard_stale_carrier_state(flow, username)
             stored_state = None
         context_options = flow.context_options()
 
@@ -88,6 +90,12 @@ def _should_use_stored_state(
         )
         return False
     return True
+
+
+def _discard_stale_carrier_state(flow: CarrierFlow, username: str) -> None:
+    discard = getattr(flow, "discard_stale_state", None)
+    if callable(discard):
+        discard(username)
 
 
 async def _try_quick_path(
