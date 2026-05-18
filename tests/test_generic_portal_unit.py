@@ -1,5 +1,6 @@
 from backend.carriers.generic_portal import (
     GenericPortalFlow,
+    MercuryFlow,
     MERCURY_SPEC,
     PROGRESSIVE_SPEC,
 )
@@ -56,3 +57,10 @@ def test_generic_url_scheme_helpers():
         "blob:https://cp.mercuryinsurance.com/7e556b3f"
     )
     assert not GenericPortalFlow._is_blob_url("https://cp.mercuryinsurance.com/")
+
+
+def test_mercury_rejects_oversized_declaration_pdf():
+    assert MercuryFlow._is_plausible_mercury_declarations_pdf(b"%PDF-1.7")
+    assert not MercuryFlow._is_plausible_mercury_declarations_pdf(
+        b"%PDF-1.7" + (b"x" * 750_001)
+    )

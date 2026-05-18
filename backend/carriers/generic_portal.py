@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import json
 import logging
 import re
 from dataclasses import dataclass
@@ -17,6 +18,7 @@ from .base import CarrierFlow
 log = logging.getLogger(__name__)
 
 DEBUG_DIR = Path("/tmp")
+MERCURY_MAX_DECLARATION_PDF_BYTES = 750_000
 
 
 @dataclass(frozen=True)
@@ -256,6 +258,8 @@ class GenericPortalFlow(CarrierFlow):
         ctx: BrowserContext,
         target: Locator,
         name: str,
+        *,
+        include_current_page: bool = True,
     ) -> tuple[bytes, str, str] | None:
         response_queue: asyncio.Queue = asyncio.Queue()
 
@@ -281,8 +285,13 @@ class GenericPortalFlow(CarrierFlow):
                 ),
                 asyncio.create_task(self._document_from_download(download_task, name)),
                 asyncio.create_task(self._document_from_popup(popup_task, http, name)),
-                asyncio.create_task(self._document_from_current_page(page, http, name)),
             ]
+            if include_current_page:
+                tasks.append(
+                    asyncio.create_task(
+                        self._document_from_current_page(page, http, name)
+                    )
+                )
             try:
                 for completed in asyncio.as_completed(tasks, timeout=7.0):
                     try:
@@ -307,12 +316,24 @@ class GenericPortalFlow(CarrierFlow):
     async def _document_from_response_queue(
         self, queue: asyncio.Queue, name: str
     ) -> tuple[bytes, str, str]:
-        resp = await queue.get()
-        body = await resp.body()
-        content_type = resp.headers.get("content-type", "application/pdf")
-        if not self._is_document_body(body, content_type):
-            raise RuntimeError("response is not a document")
-        return body, content_type, self._name_from_headers(resp.headers, resp.url, name)
+        deadline = asyncio.get_running_loop().time() + 6.5
+        while asyncio.get_running_loop().time() < deadline:
+            remaining = deadline - asyncio.get_running_loop().time()
+            try:
+                resp = await asyncio.wait_for(queue.get(), timeout=remaining)
+            except asyncio.TimeoutError:
+                break
+            content_type = resp.headers.get("content-type", "application/pdf")
+            try:
+                body = await resp.body()
+            except Exception:
+                continue
+            if not self._is_document_body(body, content_type):
+                continue
+            return body, content_type, self._name_from_headers(
+                resp.headers, resp.url, name
+            )
+        raise RuntimeError("no valid document response observed")
 
     async def _document_from_download(
         self, download_task: asyncio.Task, name: str
@@ -783,7 +804,7 @@ class MercuryFlow(GenericPortalFlow):
             "a[aria-label='View documents in group'], a.document-drop-down"
         )
         for idx in range(await expanders.count()):
-            if await self._declarations_anchor_index(page) is not None:
+            if await self._visible_declarations_anchor_index(page) is not None:
                 return
             expander = expanders.nth(idx)
             try:
@@ -798,6 +819,8 @@ class MercuryFlow(GenericPortalFlow):
                 except Exception:
                     continue
             await page.wait_for_timeout(350)
+            if await self._visible_declarations_anchor_index(page) is not None:
+                return
 
     async def _open_declarations_document(
         self,
@@ -816,38 +839,121 @@ class MercuryFlow(GenericPortalFlow):
             await self._dump_mercury_document_links(page)
             raise RuntimeError("Mercury: declaration link not found")
 
-        fallback_payload: tuple[bytes, str, str] | None = None
+        oversized: list[tuple[int, int, str]] = []
         for target_idx in candidate_indices:
             target = page.locator("a").nth(target_idx)
             name = await self._anchor_text(page, target_idx)
             if not name:
                 name = "Auto Insurance Policy Declarations"
-            payload = await self._click_for_document(page, http, ctx, target, name)
+            payload = await self._click_for_mercury_document(page, ctx, target, name)
             if payload is None:
                 continue
             body, content_type, filename = payload
-            if fallback_payload is None:
-                fallback_payload = payload
-            if len(body) <= 750_000:
+            if self._is_plausible_mercury_declarations_pdf(body):
                 return self._single_document(body, content_type, filename)
-            log.info(
+            oversized.append((target_idx, len(body), filename))
+            log.warning(
                 "Mercury declaration candidate %s yielded large PDF (%d bytes); "
-                "trying next declaration candidate",
+                "rejecting it and trying next declaration candidate",
                 target_idx,
                 len(body),
             )
             await self._return_to_documents_page(page)
 
-        if fallback_payload is not None:
-            return self._single_document(*fallback_payload)
+        await self._dump_mercury_document_links(page)
+        if oversized:
+            detail = ", ".join(
+                f"anchor {idx}: {size} bytes ({name})"
+                for idx, size, name in oversized[:5]
+            )
+            raise RuntimeError(
+                "Mercury: only oversized declaration-like PDFs were found; "
+                f"refusing to return likely wrong document. {detail}"
+            )
         return [], {}
+
+    async def _click_for_mercury_document(
+        self,
+        page: Page,
+        ctx: BrowserContext,
+        target: Locator,
+        name: str,
+    ) -> tuple[bytes, str, str] | None:
+        response_queue: asyncio.Queue = asyncio.Queue()
+
+        def on_response(resp):
+            if "/OAUTH/CONSUMER/Document/V1" in resp.url:
+                response_queue.put_nowait(resp)
+
+        page.on("response", on_response)
+        popup_task = asyncio.create_task(ctx.wait_for_event("page", timeout=8000))
+        try:
+            try:
+                await target.scroll_into_view_if_needed(timeout=1500)
+            except Exception:
+                pass
+            try:
+                await target.click(timeout=5000)
+            except Exception:
+                await target.click(timeout=5000, force=True)
+
+            try:
+                body, content_type, filename = await self._mercury_pdf_from_queue(
+                    response_queue, name
+                )
+                return body, content_type, filename
+            finally:
+                if popup_task.done() and not popup_task.cancelled():
+                    try:
+                        popup = popup_task.result()
+                        if not popup.is_closed():
+                            await popup.close()
+                    except Exception:
+                        pass
+        except Exception as e:
+            log.warning("Mercury document click did not yield a PDF payload: %s", e)
+            return None
+        finally:
+            page.remove_listener("response", on_response)
+            if not popup_task.done():
+                popup_task.cancel()
+
+    async def _mercury_pdf_from_queue(
+        self, queue: asyncio.Queue, name: str
+    ) -> tuple[bytes, str, str]:
+        deadline = asyncio.get_running_loop().time() + 8
+        last_error: Exception | None = None
+        while asyncio.get_running_loop().time() < deadline:
+            remaining = deadline - asyncio.get_running_loop().time()
+            try:
+                resp = await asyncio.wait_for(queue.get(), timeout=remaining)
+            except asyncio.TimeoutError:
+                break
+            try:
+                data = json.loads((await resp.body()).decode("utf-8"))
+                response = data.get("response") or {}
+                if response.get("messageCode") != "200":
+                    raise RuntimeError(f"Document/V1 messageCode={response.get('messageCode')}")
+                encoded = response.get("pdfPayload")
+                if not encoded:
+                    raise RuntimeError("Document/V1 response missing pdfPayload")
+                body = base64.b64decode(encoded)
+                if not self._is_document_body(body, "application/pdf"):
+                    raise RuntimeError("Document/V1 pdfPayload is not a PDF")
+                filename = response.get("dName") or name
+                return body, "application/pdf", filename
+            except Exception as e:
+                last_error = e
+                continue
+        raise RuntimeError(f"no valid Mercury Document/V1 PDF payload: {last_error}")
 
     async def _preferred_declarations_anchor_index(self, page: Page) -> int | None:
         matches = await page.eval_on_selector_all(
-            "#doc-counter-version section:first-of-type "
-            "div.documents-container p.group-document a.desktop",
+            "#doc-counter-version section div.documents-container "
+            "p.group-document a.desktop",
             """els => els.map(el => {
                 const allAnchors = Array.from(document.querySelectorAll('a'));
+                const section = el.closest('section');
                 const text = (el.innerText || el.textContent || '')
                     .replace(/\\s+/g, ' ')
                     .trim();
@@ -861,6 +967,9 @@ class MercuryFlow(GenericPortalFlow):
                     index: allAnchors.indexOf(el),
                     text,
                     visible,
+                    sectionText: (section?.innerText || '')
+                        .replace(/\\s+/g, ' ')
+                        .trim(),
                     pathText: (el.closest('p.group-document')?.innerText || '')
                         .replace(/\\s+/g, ' ')
                         .trim()
@@ -873,8 +982,28 @@ class MercuryFlow(GenericPortalFlow):
         )
         if not matches:
             return None
-        log.info("Mercury preferred declaration candidates: %s", matches)
-        return int(matches[0]["index"])
+
+        def score(item: dict) -> tuple[int, int]:
+            text = item["text"].lower()
+            section_text = item.get("sectionText", "").lower()
+            value = 0
+            if text == "auto insurance policy declarations":
+                value += 100
+            if "renewal" in section_text:
+                value += 20
+            if "change" in section_text:
+                value -= 10
+            return value, -int(item["index"])
+
+        ordered = sorted(matches, key=score, reverse=True)
+        log.info("Mercury preferred declaration candidates: %s", ordered[:5])
+        return int(ordered[0]["index"])
+
+    async def _visible_declarations_anchor_index(self, page: Page) -> int | None:
+        preferred_idx = await self._preferred_declarations_anchor_index(page)
+        if preferred_idx is not None:
+            return preferred_idx
+        return await self._declarations_anchor_index(page)
 
     async def _declarations_anchor_index(self, page: Page) -> int | None:
         indices = await self._declarations_anchor_indices(page)
@@ -902,8 +1031,9 @@ class MercuryFlow(GenericPortalFlow):
         def score(item: dict) -> tuple[int, int]:
             text = item["text"].lower()
             value = 0
-            if item["visible"]:
-                value += 100
+            if not item["visible"]:
+                return 0, -int(item["index"])
+            value += 100
             if "auto insurance policy declarations" in text:
                 value += 80
             elif "policy declarations" in text:
@@ -937,15 +1067,57 @@ class MercuryFlow(GenericPortalFlow):
         try:
             links = await page.eval_on_selector_all(
                 "a",
-                """els => els.map((el, index) => ({
-                    index,
-                    text: (el.innerText || el.textContent || '').replace(/\\s+/g, ' ').trim(),
-                    aria: el.getAttribute('aria-label') || '',
-                    href: el.href || el.getAttribute('href') || '',
-                    className: el.className || ''
-                })).filter(item => item.text || item.aria || item.href)""",
+                """els => {
+                    function sanitize(href) {
+                        return (href || '').replace(
+                            /([?&](?:pnToken|systemToken|token|policyNumber|termIdentifier)=)[^&]+/ig,
+                            '$1...'
+                        );
+                    }
+                    function nthOfType(el) {
+                        let n = 1;
+                        let prev = el.previousElementSibling;
+                        while (prev) {
+                            if (prev.tagName === el.tagName) n++;
+                            prev = prev.previousElementSibling;
+                        }
+                        return `${el.tagName.toLowerCase()}:nth-of-type(${n})`;
+                    }
+                    function path(el) {
+                        const parts = [];
+                        let cur = el;
+                        while (cur && cur.nodeType === 1 && parts.length < 8) {
+                            if (cur.id) {
+                                parts.unshift(`${cur.tagName.toLowerCase()}#${cur.id}`);
+                                break;
+                            }
+                            const classes = Array.from(cur.classList || []).slice(0, 2);
+                            parts.unshift(`${nthOfType(cur)}${classes.map(c => `.${c}`).join('')}`);
+                            cur = cur.parentElement;
+                        }
+                        return parts.join(' > ');
+                    }
+                    return els.map((el, index) => ({
+                        index,
+                        text: (el.innerText || el.textContent || '').replace(/\\s+/g, ' ').trim(),
+                        aria: el.getAttribute('aria-label') || '',
+                        href: sanitize(el.href || el.getAttribute('href') || ''),
+                        className: String(el.className || ''),
+                        visible: el.getClientRects().length > 0,
+                        cssPath: path(el),
+                        groupText: (el.closest('p.group-document')?.innerText || '')
+                            .replace(/\\s+/g, ' ')
+                            .trim()
+                    })).filter(item => item.text || item.aria || item.href);
+                }""",
             )
-            log.info("Mercury document links: %s", links[:80])
+            path = DEBUG_DIR / "mercury-document-links.json"
+            path.write_text(json.dumps(links[:120], indent=2))
+            log.info(
+                "Mercury document links debug dump -> %s (%d anchors)",
+                path,
+                len(links),
+            )
         except Exception:
             pass
         await self._dump_debug(page, "mercury-document-links")
@@ -956,3 +1128,7 @@ class MercuryFlow(GenericPortalFlow):
         except Exception:
             pass
         await self._settle(page, delay_ms=500, networkidle_timeout_ms=6000)
+
+    @staticmethod
+    def _is_plausible_mercury_declarations_pdf(body: bytes) -> bool:
+        return len(body) <= MERCURY_MAX_DECLARATION_PDF_BYTES
