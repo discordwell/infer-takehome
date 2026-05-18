@@ -88,11 +88,14 @@ def test_set_docs_transitions_to_done_and_publishes():
     queue.get_nowait()  # drain initial
 
     docs = [Document(id="d1", name="dec.pdf", size_bytes=1024)]
-    mgr.set_docs(session.id, docs, {"d1": b"%PDF-1.4"})
+    timings = {"doc_pdf_bytes": 1234, "docs_ready_publish": 2345}
+    mgr.set_docs(session.id, docs, {"d1": b"%PDF-1.4"}, timings_ms=timings)
     evt = queue.get_nowait()
     assert evt.event == "docs_ready"
     assert evt.state == SessionState.DONE
     assert evt.docs == docs
+    assert evt.timings_ms == timings
+    assert isinstance(evt.server_ts_ms, int)
     assert mgr.get_doc_bytes(session.id, "d1") == b"%PDF-1.4"
 
 

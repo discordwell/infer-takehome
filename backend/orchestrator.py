@@ -86,7 +86,12 @@ async def _try_quick_path(
                 # refresh stored state in case carrier rotated cookies
                 storage.save(carrier.value, username, await ctx.storage_state())
                 _mark_timing(flow, "docs_ready_publish")
-                manager.set_docs(session_id, docs, doc_bytes)
+                manager.set_docs(
+                    session_id,
+                    docs,
+                    doc_bytes,
+                    timings_ms=_timing_snapshot(flow),
+                )
                 _log_timing(flow, session_id)
                 return True
             except Exception as e:  # noqa: BLE001
@@ -103,7 +108,12 @@ async def _try_quick_path(
         # refresh stored state in case carrier rotated cookies
         storage.save(carrier.value, username, await ctx.storage_state())
         _mark_timing(flow, "docs_ready_publish")
-        manager.set_docs(session_id, docs, doc_bytes)
+        manager.set_docs(
+            session_id,
+            docs,
+            doc_bytes,
+            timings_ms=_timing_snapshot(flow),
+        )
         _log_timing(flow, session_id)
         return True
     except Exception as e:  # noqa: BLE001
@@ -153,7 +163,12 @@ async def _full_login(
 
     storage.save(carrier.value, username, await ctx.storage_state())
     _mark_timing(flow, "docs_ready_publish")
-    manager.set_docs(session_id, docs, doc_bytes)
+    manager.set_docs(
+        session_id,
+        docs,
+        doc_bytes,
+        timings_ms=_timing_snapshot(flow),
+    )
     _log_timing(flow, session_id)
 
 
@@ -175,3 +190,12 @@ def _log_timing(flow: CarrierFlow, session_id: str) -> None:
         summary = report()
         if summary:
             log.info("timing summary for session %s: %s", session_id, summary)
+
+
+def _timing_snapshot(flow: CarrierFlow) -> dict[str, int] | None:
+    snapshot = getattr(flow, "timing_snapshot", None)
+    if callable(snapshot):
+        timings = snapshot()
+        if timings:
+            return timings
+    return None

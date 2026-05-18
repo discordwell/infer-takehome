@@ -51,3 +51,5 @@ class StatusEvent(BaseModel):
     detail: str | None = None
     docs: list[Document] | None = None
     error: str | None = None
+    server_ts_ms: int | None = None
+    timings_ms: dict[str, int] | None = None

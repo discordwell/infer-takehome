@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import re
 import time
@@ -97,6 +98,12 @@ class UsaaFlow(CarrierFlow):
         return ", ".join(
             f"{label}={elapsed:.3f}s" for label, elapsed in self._timings
         )
+
+    def timing_snapshot(self) -> dict[str, int]:
+        timings: dict[str, int] = {}
+        for label, elapsed in self._timings:
+            timings.setdefault(label, int(round(elapsed * 1000)))
+        return timings
 
     def context_options(self) -> dict:
         return {
@@ -263,12 +270,23 @@ class UsaaFlow(CarrierFlow):
     ) -> tuple[list[Document], dict[str, bytes]]:
         self.mark_timing("docs_fetch_start")
         await self._prepare_page(page)
-        docs, doc_bytes = await self._fetch_from_document_surface(page, http, ctx)
-        if docs:
-            self.mark_timing("docs_first_document_ready")
-            return docs, doc_bytes
+        all_docs: list[Document] = []
+        all_doc_bytes: dict[str, bytes] = {}
+        seen: set[str] = set()
+        saw_document_candidates = False
 
-        candidates: list[tuple[str, str]] = []
+        async def merge(
+            docs: list[Document],
+            doc_bytes: dict[str, bytes],
+        ) -> None:
+            had_docs = bool(all_docs)
+            self._merge_documents(all_docs, all_doc_bytes, seen, docs, doc_bytes)
+            if not had_docs and all_docs:
+                self.mark_timing("docs_first_document_ready")
+
+        docs, doc_bytes = await self._fetch_from_document_surface(page, http, ctx)
+        await merge(docs, doc_bytes)
+
         for url in DOCS_URL_CANDIDATES:
             try:
                 resp = await page.goto(url, wait_until="domcontentloaded", timeout=15000)
@@ -280,13 +298,15 @@ class UsaaFlow(CarrierFlow):
                             body = await resp.body()
                             if self._is_document_body(body, content_type):
                                 self.mark_timing("doc_pdf_bytes")
-                                return self._single_document(
+                                docs, doc_bytes = self._single_document(
                                     body,
                                     content_type,
                                     self._name_from_headers(
                                         resp.headers, resp.url, "USAA document 1"
                                     ),
                                 )
+                                await merge(docs, doc_bytes)
+                                continue
                         except Exception:
                             pass
                 title = (await page.title()).lower()
@@ -294,29 +314,35 @@ class UsaaFlow(CarrierFlow):
                     continue
                 if "page not found" in title:
                     continue
-                try:
-                    await page.locator("button[data-testid^='readDocument-']").first.wait_for(
-                        state="visible", timeout=8000
-                    )
-                    self.mark_timing("docs_button_visible")
-                except Exception:
-                    await page.wait_for_timeout(500)
             except Exception as e:
                 log.warning("usaa: docs URL %s failed: %s", url, e)
                 continue
             docs, doc_bytes = await self._fetch_from_document_surface(page, http, ctx)
-            if docs:
-                self.mark_timing("docs_first_document_ready")
-                return docs, doc_bytes
+            await merge(docs, doc_bytes)
 
             candidates = await self._collect_document_links(page)
             if candidates:
-                break
+                saw_document_candidates = True
+                docs, doc_bytes = await self._fetch_document_link_candidates(
+                    http, candidates
+                )
+                await merge(docs, doc_bytes)
 
-        if not candidates:
+        if all_docs:
+            return all_docs, all_doc_bytes
+
+        if not saw_document_candidates:
             await self._dump_debug(page, "docs-no-links")
             raise RuntimeError("USAA: authenticated, but no document links found yet")
 
+        await self._dump_debug(page, "docs-fetch-failed")
+        raise RuntimeError("USAA: found document links, but downloads failed")
+
+    async def _fetch_document_link_candidates(
+        self,
+        http: httpx.AsyncClient,
+        candidates: list[tuple[str, str]],
+    ) -> tuple[list[Document], dict[str, bytes]]:
         async def fetch(name: str, href: str, idx: int):
             try:
                 r = await http.get(href)
@@ -356,9 +382,6 @@ class UsaaFlow(CarrierFlow):
             doc, body = result
             docs.append(doc)
             doc_bytes[doc.id] = body
-        if not docs:
-            await self._dump_debug(page, "docs-fetch-failed")
-            raise RuntimeError("USAA: found document links, but downloads failed")
         return docs, doc_bytes
 
     async def _fetch_from_document_surface(
@@ -367,22 +390,25 @@ class UsaaFlow(CarrierFlow):
         http: httpx.AsyncClient,
         ctx: BrowserContext,
     ) -> tuple[list[Document], dict[str, bytes]]:
-        docs, doc_bytes = await self._fetch_document_buttons(page, http, ctx)
-        if docs:
-            return docs, doc_bytes
+        all_docs: list[Document] = []
+        all_doc_bytes: dict[str, bytes] = {}
+        seen: set[str] = set()
 
-        docs, doc_bytes = await self._fetch_named_document_actions(page, http, ctx)
-        if docs:
-            return docs, doc_bytes
+        docs, doc_bytes = await self._fetch_document_buttons(page, http, ctx)
+        self._merge_documents(all_docs, all_doc_bytes, seen, docs, doc_bytes)
 
         if await self._open_policy_documents_from_summary(page):
             self.mark_timing("policy_documents_opened")
             docs, doc_bytes = await self._fetch_document_buttons(page, http, ctx)
-            if docs:
-                return docs, doc_bytes
-            return await self._fetch_named_document_actions(page, http, ctx)
+            self._merge_documents(all_docs, all_doc_bytes, seen, docs, doc_bytes)
 
-        return [], {}
+        docs, doc_bytes = await self._fetch_named_document_actions(page, http, ctx)
+        self._merge_documents(all_docs, all_doc_bytes, seen, docs, doc_bytes)
+
+        if all_docs:
+            return all_docs, all_doc_bytes
+
+        return all_docs, all_doc_bytes
 
     async def _fetch_document_buttons(
         self,
@@ -393,56 +419,53 @@ class UsaaFlow(CarrierFlow):
         buttons = page.locator("button[data-testid^='readDocument-']")
         count = await buttons.count()
         if count == 0:
-            return [], {}
-
-        button = buttons.first
-        try:
-            name = (await button.inner_text(timeout=2000)).strip() or "USAA document 1"
-        except Exception:
-            name = "USAA document 1"
-
-        try:
-            href = await self._direct_document_href(button)
-            if href:
-                direct = await self._fetch_direct_document(http, href, name)
-                if direct is not None:
-                    body, content_type, display_name = direct
-                    return self._single_document(body, content_type, display_name)
-
-            response_queue: asyncio.Queue = asyncio.Queue()
-            saw_response_headers = False
-
-            def on_response(resp):
-                nonlocal saw_response_headers
-                if self._looks_like_document_response(resp):
-                    response_queue.put_nowait(resp)
-                    if not saw_response_headers:
-                        self.mark_timing("doc_pdf_response_headers")
-                        saw_response_headers = True
-
-            page.on("response", on_response)
-            download_task = asyncio.create_task(
-                page.wait_for_event("download", timeout=7000)
-            )
-            popup_task = asyncio.create_task(ctx.wait_for_event("page", timeout=7000))
             try:
-                await button.click(timeout=5000)
-                self.mark_timing("doc_button_clicked")
-                payload = await self._first_document_payload(
-                    page, http, response_queue, download_task, popup_task, name
-                )
-            finally:
-                page.remove_listener("response", on_response)
-                for task in (download_task, popup_task):
-                    if not task.done():
-                        task.cancel()
+                await buttons.first.wait_for(state="visible", timeout=2500)
+                self.mark_timing("docs_button_visible")
+                count = await buttons.count()
+            except Exception:
+                return [], {}
 
-            if payload is not None:
-                body, content_type, display_name = payload
-                return self._single_document(body, content_type, display_name)
-        except Exception as e:
-            log.warning("usaa: first document button failed: %s", e)
-        return [], {}
+        all_docs: list[Document] = []
+        all_doc_bytes: dict[str, bytes] = {}
+        seen: set[str] = set()
+        for idx in range(count):
+            button = buttons.nth(idx)
+            try:
+                name = (
+                    await button.inner_text(timeout=2000)
+                ).strip() or f"USAA document {idx + 1}"
+            except Exception:
+                name = f"USAA document {idx + 1}"
+
+            try:
+                href = await self._direct_document_href(button)
+                if href:
+                    direct = await self._fetch_direct_document(http, href, name)
+                    if direct is not None:
+                        body, content_type, display_name = direct
+                        docs, doc_bytes = self._single_document(
+                            body, content_type, display_name
+                        )
+                        self._merge_documents(
+                            all_docs, all_doc_bytes, seen, docs, doc_bytes
+                        )
+                        continue
+
+                payload = await self._click_for_first_document(
+                    page, http, ctx, button, name
+                )
+                if payload is not None:
+                    body, content_type, display_name = payload
+                    docs, doc_bytes = self._single_document(
+                        body, content_type, display_name
+                    )
+                    self._merge_documents(
+                        all_docs, all_doc_bytes, seen, docs, doc_bytes
+                    )
+            except Exception as e:
+                log.warning("usaa: document button %s failed: %s", idx, e)
+        return all_docs, all_doc_bytes
 
     async def _fetch_named_document_actions(
         self,
@@ -454,6 +477,9 @@ class UsaaFlow(CarrierFlow):
             re.compile(r"Proof of insurance", re.I),
             re.compile(r"^(Auto )?ID card$", re.I),
         )
+        all_docs: list[Document] = []
+        all_doc_bytes: dict[str, bytes] = {}
+        seen: set[str] = set()
         for pattern in action_patterns:
             button = page.get_by_role("button", name=pattern).first
             if await button.count() == 0:
@@ -468,10 +494,15 @@ class UsaaFlow(CarrierFlow):
                 )
                 if payload is not None:
                     body, content_type, display_name = payload
-                    return self._single_document(body, content_type, display_name)
+                    docs, doc_bytes = self._single_document(
+                        body, content_type, display_name
+                    )
+                    self._merge_documents(
+                        all_docs, all_doc_bytes, seen, docs, doc_bytes
+                    )
             except Exception as e:
                 log.warning("usaa: document action %s failed: %s", pattern.pattern, e)
-        return [], {}
+        return all_docs, all_doc_bytes
 
     async def _click_for_first_document(
         self,
@@ -659,6 +690,32 @@ class UsaaFlow(CarrierFlow):
             size_bytes=len(body),
         )
         return [doc], {doc.id: body}
+
+    def _merge_documents(
+        self,
+        target_docs: list[Document],
+        target_bytes: dict[str, bytes],
+        seen: set[str],
+        source_docs: list[Document],
+        source_bytes: dict[str, bytes],
+    ) -> None:
+        for source in source_docs:
+            body = source_bytes.get(source.id)
+            if not body:
+                continue
+            key = hashlib.sha256(body).hexdigest()
+            if key in seen:
+                continue
+            seen.add(key)
+            doc_id = f"usaa-doc-{len(target_docs)}"
+            doc = Document(
+                id=doc_id,
+                name=source.name,
+                content_type=source.content_type,
+                size_bytes=len(body),
+            )
+            target_docs.append(doc)
+            target_bytes[doc_id] = body
 
     async def _extract_document_from_page(
         self, page: Page, http: httpx.AsyncClient

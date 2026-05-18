@@ -68,7 +68,7 @@
     const handler = (evt) => {
       let payload;
       try { payload = JSON.parse(evt.data); } catch (e) { return; }
-      const { state, detail, docs, error } = payload;
+      const { state, detail, docs, error, timings_ms } = payload;
       setStatus(state, detail);
 
       if (state === "MFA_REQUIRED") {
@@ -76,7 +76,7 @@
       } else if (state === "AUTHENTICATING" || state === "FETCHING_DOCS" || state === "LOGGING_IN") {
         show("waiting");
       } else if (state === "DONE") {
-        renderDocs(docs || []);
+        renderDocs(docs || [], timings_ms || null);
         if (eventSource) { eventSource.close(); eventSource = null; }
       } else if (state === "ERROR") {
         showError(error || "Server error");
@@ -92,17 +92,26 @@
     });
   }
 
-  function renderDocs(docs) {
+  function renderDocs(docs, timingsMs) {
     const list = document.getElementById("docs-list");
     list.innerHTML = "";
     document.getElementById("docs-summary").textContent =
       `${docs.length} document${docs.length === 1 ? "" : "s"} retrieved.`;
 
+    const timingParts = [];
+    const serverOrigin =
+      timingsMs && timingsMs.mfa_code_received != null ? "Server MFA submit" : "Server fetch start";
+    if (timingsMs && timingsMs.doc_pdf_bytes != null) {
+      timingParts.push(`${serverOrigin} → first PDF bytes: ${timingsMs.doc_pdf_bytes} ms`);
+    }
+    if (timingsMs && timingsMs.docs_ready_publish != null) {
+      timingParts.push(`${serverOrigin} → all documents ready: ${timingsMs.docs_ready_publish} ms`);
+    }
     if (mfaStartTs != null) {
       const elapsedMs = Math.round(performance.now() - mfaStartTs);
-      document.getElementById("docs-latency").textContent =
-        `Latency from MFA submit → docs rendered: ${elapsedMs} ms`;
+      timingParts.push(`Browser MFA submit → docs rendered: ${elapsedMs} ms`);
     }
+    document.getElementById("docs-latency").textContent = timingParts.join(" | ");
 
     for (const d of docs) {
       const url = `/api/docs/${sessionId}/${d.id}`;

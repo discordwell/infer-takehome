@@ -21,6 +21,7 @@ class Session:
     doc_bytes: dict[str, bytes] = field(default_factory=dict)
     error: str | None = None
     detail: str | None = None
+    timings_ms: dict[str, int] | None = None
     created_at: float = field(default_factory=time.time)
     subscribers: list[asyncio.Queue[StatusEvent]] = field(default_factory=list)
     task: asyncio.Task | None = None
@@ -80,10 +81,13 @@ class SessionManager:
         session_id: str,
         docs: list[Document],
         doc_bytes: dict[str, bytes],
+        *,
+        timings_ms: dict[str, int] | None = None,
     ) -> None:
         session = self.get(session_id)
         session.docs = docs
         session.doc_bytes = doc_bytes
+        session.timings_ms = timings_ms
         session.state = SessionState.DONE
         self._publish(session, event="docs_ready")
 
@@ -155,6 +159,8 @@ class SessionManager:
             detail=session.detail,
             docs=session.docs or None,
             error=session.error,
+            server_ts_ms=int(time.time() * 1000),
+            timings_ms=session.timings_ms,
         )
 
     def _prune_stale(self) -> None:
