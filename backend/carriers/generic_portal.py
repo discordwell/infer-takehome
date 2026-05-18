@@ -267,7 +267,14 @@ class GenericPortalFlow(CarrierFlow):
         download_task = asyncio.create_task(page.wait_for_event("download", timeout=6000))
         popup_task = asyncio.create_task(ctx.wait_for_event("page", timeout=6000))
         try:
-            await target.click(timeout=5000)
+            try:
+                await target.scroll_into_view_if_needed(timeout=1500)
+            except Exception:
+                pass
+            try:
+                await target.click(timeout=5000)
+            except Exception:
+                await target.click(timeout=5000, force=True)
             tasks = [
                 asyncio.create_task(
                     self._document_from_response_queue(response_queue, name)
@@ -721,7 +728,7 @@ class MercuryFlow(GenericPortalFlow):
                 await self._open_first_policy(page)
             await self._open_document_history(page)
 
-        await self._expand_document_group(page)
+        await self._expand_document_groups(page)
         docs, doc_bytes = await self._open_declarations_document(page, http, ctx)
         if docs:
             return docs, doc_bytes
@@ -766,18 +773,31 @@ class MercuryFlow(GenericPortalFlow):
         await history.click(timeout=5000)
         await self._wait_for_mercury_url(page, "/customer/mydocuments")
 
-    async def _expand_document_group(self, page: Page) -> None:
-        expander = await self._first_present(
-            page.locator("a[aria-label='View documents in group']:visible").first,
-            page.locator("a.document-drop-down:visible").first,
-            page.locator("[role='button']:visible", has_text="View").first,
+    async def _expand_document_groups(self, page: Page) -> None:
+        await self._first_present(
+            page.locator("a[aria-label='View documents in group']").first,
+            page.locator("a.document-drop-down").first,
             timeout_ms=10000,
         )
-        try:
-            await expander.click(timeout=5000)
-            await page.wait_for_timeout(300)
-        except Exception:
-            pass
+        expanders = page.locator(
+            "a[aria-label='View documents in group'], a.document-drop-down"
+        )
+        for idx in range(await expanders.count()):
+            if await self._declarations_anchor_index(page) is not None:
+                return
+            expander = expanders.nth(idx)
+            try:
+                await expander.scroll_into_view_if_needed(timeout=1500)
+            except Exception:
+                pass
+            try:
+                await expander.click(timeout=2500)
+            except Exception:
+                try:
+                    await expander.click(timeout=2500, force=True)
+                except Exception:
+                    continue
+            await page.wait_for_timeout(350)
 
     async def _open_declarations_document(
         self,
@@ -785,22 +805,83 @@ class MercuryFlow(GenericPortalFlow):
         http: httpx.AsyncClient,
         ctx: BrowserContext,
     ) -> tuple[list[Document], dict[str, bytes]]:
-        target = await self._first_present(
-            page.get_by_text(
-                re.compile(r"auto\s+insurance\s+policy\s+declarations", re.I)
-            ).first,
-            page.get_by_text(re.compile(r"policy\s+declarations", re.I)).first,
-            page.locator("a:visible", has_text=re.compile(r"declarations", re.I)).first,
-            timeout_ms=10000,
-        )
-        try:
-            name = (await target.inner_text(timeout=1000)).strip()
-        except Exception:
+        target_idx = await self._declarations_anchor_index(page)
+        if target_idx is None:
+            await self._dump_mercury_document_links(page)
+            raise RuntimeError("Mercury: declaration link not found")
+
+        target = page.locator("a").nth(target_idx)
+        name = await self._anchor_text(page, target_idx)
+        if not name:
             name = "Auto Insurance Policy Declarations"
         payload = await self._click_for_document(page, http, ctx, target, name)
         if payload is None:
             return [], {}
         return self._single_document(*payload)
+
+    async def _declarations_anchor_index(self, page: Page) -> int | None:
+        matches = await page.eval_on_selector_all(
+            "a",
+            """els => els.map((el, index) => {
+                const text = (el.innerText || el.textContent || '')
+                    .replace(/\\s+/g, ' ')
+                    .trim();
+                const rects = el.getClientRects();
+                const style = window.getComputedStyle(el);
+                const visible = rects.length > 0
+                    && style.visibility !== 'hidden'
+                    && style.display !== 'none'
+                    && Number(style.opacity || '1') > 0;
+                return { index, text, visible };
+            }).filter(item => /declarations?/i.test(item.text))""",
+        )
+        if not matches:
+            return None
+
+        def score(item: dict) -> tuple[int, int]:
+            text = item["text"].lower()
+            value = 0
+            if item["visible"]:
+                value += 100
+            if "auto insurance policy declarations" in text:
+                value += 80
+            elif "policy declarations" in text:
+                value += 60
+            elif "declarations" in text:
+                value += 40
+            if "change" in text or "renewal" in text:
+                value -= 20
+            return value, -int(item["index"])
+
+        best = max(matches, key=score)
+        if score(best)[0] <= 0:
+            return None
+        return int(best["index"])
+
+    async def _anchor_text(self, page: Page, index: int) -> str:
+        try:
+            return await page.locator("a").nth(index).evaluate(
+                "el => (el.innerText || el.textContent || '').replace(/\\s+/g, ' ').trim()"
+            )
+        except Exception:
+            return ""
+
+    async def _dump_mercury_document_links(self, page: Page) -> None:
+        try:
+            links = await page.eval_on_selector_all(
+                "a",
+                """els => els.map((el, index) => ({
+                    index,
+                    text: (el.innerText || el.textContent || '').replace(/\\s+/g, ' ').trim(),
+                    aria: el.getAttribute('aria-label') || '',
+                    href: el.href || el.getAttribute('href') || '',
+                    className: el.className || ''
+                })).filter(item => item.text || item.aria || item.href)""",
+            )
+            log.info("Mercury document links: %s", links[:80])
+        except Exception:
+            pass
+        await self._dump_debug(page, "mercury-document-links")
 
     async def _wait_for_mercury_url(self, page: Page, fragment: str) -> None:
         try:
