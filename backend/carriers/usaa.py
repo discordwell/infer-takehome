@@ -9,6 +9,7 @@ import shutil
 import sys
 import time
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from typing import AsyncIterator, Awaitable, Callable
 
@@ -43,6 +44,21 @@ DOCS_URL_CANDIDATES = (
     "https://www.usaa.com/my/insurance",
     "https://www.usaa.com/inet/wc/insurance_auto_main",
 )
+DOCUMENT_CENTER_URL_CANDIDATES = (
+    "https://www.usaa.com/my/documents?akredirect=true",
+    "https://www.usaa.com/my/documents",
+    "https://www.usaa.com/inet/wc/document_center",
+)
+POLICY_DOCUMENT_SEARCH_TERMS = (
+    "Declarations",
+    "Declaration",
+    "Initial",
+    "New Policy",
+    "Policy Packet",
+    "Renew",
+    "Renewal",
+    "Policy",
+)
 DEBUG_DIR = Path("/tmp")
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 USAA_CHROME_PROFILE_DIR = (
@@ -69,6 +85,17 @@ if (origQuery) {
       : origQuery(params);
 }
 """
+
+
+@dataclass(frozen=True)
+class UsaaDocumentButtonCandidate:
+    index: int
+    title: str
+    date_delivered: str
+    account: str
+    policy_key: str
+    document_kind: str
+    row_text: str
 
 
 class UsaaFlow(CarrierFlow):
@@ -246,10 +273,12 @@ class UsaaFlow(CarrierFlow):
             port=port,
         )
 
-        await self._focus_chrome_selector(
-            "input[name='memberId'], input[type='text']", port
+        await self._replace_chrome_selector_text(
+            "input[name='memberId'], input[type='text']",
+            username,
+            port,
+            field_label="username",
         )
-        await self._replace_focused_text(username)
         await self._click_chrome_selector("#next-button, button[type='submit']", port)
         await self._dump_os_login_debug("after-username-submit", port)
 
@@ -258,10 +287,12 @@ class UsaaFlow(CarrierFlow):
             timeout_ms=45000,
             port=port,
         )
-        await self._focus_chrome_selector(
-            "input[name='password'], input[type='password']", port
+        await self._replace_chrome_selector_text(
+            "input[name='password'], input[type='password']",
+            password,
+            port,
+            field_label="password",
         )
-        await self._replace_focused_text(password)
         await self._dump_os_login_debug("after-password-fill", port)
 
         await self._click_chrome_selector("#next-button, button[type='submit']", port)
@@ -346,15 +377,117 @@ class UsaaFlow(CarrierFlow):
         else:
             await self._press_return()
 
+    async def _replace_chrome_selector_text(
+        self, selector: str, value: str, port: int, *, field_label: str
+    ) -> None:
+        await self._focus_chrome_selector(selector, port)
+        for attempt in range(3):
+            await self._replace_focused_text(value)
+            if await self._chrome_selector_value_matches(selector, value, port):
+                if attempt:
+                    log.info(
+                        "usaa: OS-browser %s fill succeeded after %s paste attempts",
+                        field_label,
+                        attempt + 1,
+                    )
+                return
+            await asyncio.sleep(0.2)
+            await self._focus_chrome_selector(selector, port)
+
+        await self._set_chrome_selector_value(selector, value, port)
+        if await self._chrome_selector_value_matches(selector, value, port):
+            log.info(
+                "usaa: OS-browser %s fill succeeded via DOM fallback",
+                field_label,
+            )
+            return
+
+        observed_length = await self._chrome_selector_value_length(selector, port)
+        raise RuntimeError(
+            f"USAA OS browser could not fill {field_label}; "
+            f"observed field length={observed_length}"
+        )
+
     async def _replace_focused_text(self, value: str) -> None:
         await self._osascript(
             f"""
+            set the clipboard to {self._applescript_string(value)}
             tell application "System Events"
                 keystroke "a" using command down
-                keystroke {self._applescript_string(value)}
+                delay 0.05
+                keystroke "v" using command down
             end tell
+            delay 0.15
+            set the clipboard to ""
             """,
             timeout_ms=10000,
+        )
+
+    async def _chrome_selector_value_matches(
+        self, selector: str, value: str, port: int
+    ) -> bool:
+        selector_json = json.dumps(selector)
+        value_json = json.dumps(value)
+        raw = await self._chrome_js(
+            f"""
+            (() => {{
+                const el = document.querySelector({selector_json});
+                return !!el && el.value === {value_json};
+            }})()
+            """,
+            timeout_ms=3000,
+            port=port,
+        )
+        return raw.strip().lower() == "true"
+
+    async def _chrome_selector_value_length(self, selector: str, port: int) -> int:
+        selector_json = json.dumps(selector)
+        raw = await self._chrome_js(
+            f"""
+            (() => {{
+                const el = document.querySelector({selector_json});
+                return el && typeof el.value === 'string' ? el.value.length : -1;
+            }})()
+            """,
+            timeout_ms=3000,
+            port=port,
+        )
+        try:
+            return int(raw)
+        except ValueError:
+            return -1
+
+    async def _set_chrome_selector_value(
+        self, selector: str, value: str, port: int
+    ) -> None:
+        selector_json = json.dumps(selector)
+        value_json = json.dumps(value)
+        await self._chrome_js(
+            f"""
+            (() => {{
+                const el = document.querySelector({selector_json});
+                if (!el) return false;
+                el.focus();
+                if (el.select) el.select();
+                const proto =
+                    el instanceof HTMLTextAreaElement
+                        ? HTMLTextAreaElement.prototype
+                        : HTMLInputElement.prototype;
+                const setter = Object.getOwnPropertyDescriptor(proto, "value").set;
+                setter.call(el, {value_json});
+                el.dispatchEvent(
+                    new InputEvent("input", {{
+                        bubbles: true,
+                        inputType: "insertText",
+                        data: {value_json},
+                    }})
+                );
+                el.dispatchEvent(new Event("change", {{ bubbles: true }}));
+                return true;
+            }})()
+            """,
+            timeout_ms=3000,
+            port=port,
         )
 
     async def _press_return(self) -> None:
@@ -756,6 +889,11 @@ class UsaaFlow(CarrierFlow):
             if not had_docs and all_docs:
                 self.mark_timing("docs_first_document_ready")
 
+        docs, doc_bytes = await self._fetch_targeted_policy_documents(page, http, ctx)
+        await merge(docs, doc_bytes)
+        if all_docs:
+            return all_docs, all_doc_bytes
+
         docs, doc_bytes = await self._fetch_from_document_surface(page, http, ctx)
         await merge(docs, doc_bytes)
         if all_docs:
@@ -888,11 +1026,423 @@ class UsaaFlow(CarrierFlow):
 
         return all_docs, all_doc_bytes
 
+    async def _looks_like_document_center(self, page: Page) -> bool:
+        deadline = time.perf_counter() + 6.0
+        while time.perf_counter() < deadline:
+            try:
+                read_buttons = page.locator("button[data-testid^='readDocument-']")
+                if await read_buttons.count() > 0:
+                    return True
+            except Exception:
+                pass
+            body = (await self._body_text(page, timeout_ms=500)).lower()
+            if any(
+                phrase in body
+                for phrase in (
+                    "my documents",
+                    "search documents",
+                    "search by title",
+                    "filter documents",
+                    "document title",
+                )
+            ):
+                return True
+            await page.wait_for_timeout(250)
+        return False
+
+    async def _wait_for_document_center_ready(self, page: Page) -> bool:
+        ready = page.locator(
+            "input[data-testid='search-text']:visible, "
+            "button[data-testid^='readDocument-']:visible"
+        )
+        try:
+            await ready.first.wait_for(state="visible", timeout=7000)
+            return True
+        except Exception:
+            return False
+
+    async def _search_document_center_by_title(self, page: Page, term: str) -> bool:
+        locators = (
+            page.locator("input[data-testid='search-text']:visible").first,
+            page.get_by_label(re.compile(r"Search by title", re.I)).first,
+            page.get_by_label(re.compile(r"Search documents", re.I)).first,
+            page.locator("input[placeholder*='Search' i]:visible").first,
+            page.locator("input[type='search']:visible").first,
+            page.locator("input[name*='search' i]:visible").first,
+        )
+        search: Locator | None = None
+        for locator in locators:
+            try:
+                await locator.wait_for(state="visible", timeout=1200)
+                await locator.click(timeout=1500)
+                await locator.fill("")
+                await locator.type(term, delay=15)
+                search = locator
+                break
+            except Exception:
+                continue
+        if search is None:
+            log.info("usaa: document search input not found for %s", term)
+            return False
+
+        submitted = False
+        for target in (
+            page.locator("button[data-testid='search-icon']:visible").first,
+            page.get_by_role(
+                "button", name=re.compile(r"^Search documents$|^Search$", re.I)
+            ).first,
+            page.locator("button[type='submit']:visible").first,
+        ):
+            try:
+                if await target.count() == 0:
+                    continue
+                await target.click(timeout=2000)
+                submitted = True
+                break
+            except Exception:
+                continue
+        if not submitted:
+            try:
+                await search.press("Enter")
+            except Exception:
+                pass
+
+        try:
+            await page.wait_for_load_state("domcontentloaded", timeout=2500)
+        except Exception:
+            pass
+        try:
+            await page.locator("button[data-testid^='readDocument-']").first.wait_for(
+                state="visible", timeout=6000
+            )
+        except Exception:
+            await page.wait_for_timeout(800)
+        return True
+
+    async def _document_center_account_filter_values(self, page: Page) -> list[str]:
+        filter_button = page.get_by_role(
+            "button", name=re.compile(r"Filter documents|Filter", re.I)
+        ).first
+        try:
+            if await filter_button.count() == 0:
+                return []
+            await filter_button.click(timeout=2500)
+            account_filter = page.locator("select[data-testid='account-filter']").first
+            await account_filter.wait_for(state="visible", timeout=2500)
+            values: list[str] = []
+            deadline = time.perf_counter() + 3.0
+            while time.perf_counter() < deadline:
+                values = await page.eval_on_selector_all(
+                    "select[data-testid='account-filter'] option",
+                    """options => options
+                        .map(option => option.getAttribute('value') || option.value || '')
+                        .filter(value => value.startsWith('accountName:'))""",
+                )
+                if values:
+                    break
+                await page.wait_for_timeout(150)
+            try:
+                await page.keyboard.press("Escape")
+            except Exception:
+                pass
+            return values
+        except Exception:
+            return []
+
+    async def _widen_document_center_date_filter(
+        self,
+        page: Page,
+        *,
+        account_filter_value: str | None = None,
+    ) -> None:
+        filter_button = page.get_by_role(
+            "button", name=re.compile(r"Filter documents|Filter", re.I)
+        ).first
+        try:
+            if await filter_button.count() == 0:
+                return
+            await filter_button.click(timeout=2500)
+            await page.wait_for_timeout(300)
+        except Exception:
+            return
+
+        if account_filter_value is not None:
+            try:
+                account_filter = page.locator(
+                    "select[data-testid='account-filter']"
+                ).first
+                if await account_filter.count() > 0:
+                    option = page.locator(
+                        f"select[data-testid='account-filter'] "
+                        f"option[value={json.dumps(account_filter_value)}]"
+                    ).first
+                    try:
+                        await option.wait_for(state="attached", timeout=2500)
+                    except Exception:
+                        pass
+                    await account_filter.select_option(value=account_filter_value)
+                    await page.wait_for_timeout(150)
+            except Exception:
+                pass
+
+        for pattern in (
+            r"Custom range",
+            r"All dates",
+            r"Any time",
+            r"All documents",
+            r"Custom date",
+            r"Date range",
+        ):
+            target = page.get_by_label(re.compile(pattern, re.I)).first
+            try:
+                if await target.count() == 0:
+                    target = page.get_by_role(
+                        "button", name=re.compile(pattern, re.I)
+                    ).first
+                if await target.count() == 0:
+                    continue
+                await target.click(timeout=1200)
+                await page.wait_for_timeout(150)
+                break
+            except Exception:
+                continue
+
+        try:
+            custom_range = page.locator("input[data-testid='dateFilter-3']").first
+            if await custom_range.count() > 0:
+                await custom_range.check(timeout=1200)
+                await page.wait_for_timeout(150)
+        except Exception:
+            pass
+
+        await self._fill_first_visible_date_field(
+            page,
+            (page.locator("input[data-testid='startDate']:visible").first,),
+            "01/01/2000",
+        )
+        await self._fill_first_visible_date_field(
+            page,
+            (page.locator("input[data-testid='endDate']:visible").first,),
+            time.strftime("%m/%d/%Y"),
+        )
+        await self._fill_first_visible_date_field(
+            page,
+            (
+                page.get_by_label(re.compile(r"From|Start", re.I)).first,
+                page.locator("input[name*='from' i]:visible").first,
+                page.locator("input[id*='from' i]:visible").first,
+                page.locator("input[name*='start' i]:visible").first,
+                page.locator("input[id*='start' i]:visible").first,
+            ),
+            "01/01/2000",
+        )
+        await self._fill_first_visible_date_field(
+            page,
+            (
+                page.get_by_label(re.compile(r"To|End", re.I)).first,
+                page.locator("input[name*='to' i]:visible").first,
+                page.locator("input[id*='to' i]:visible").first,
+                page.locator("input[name*='end' i]:visible").first,
+                page.locator("input[id*='end' i]:visible").first,
+            ),
+            time.strftime("%m/%d/%Y"),
+        )
+
+        for target in (
+            page.locator("button[data-testid='filter-button']:visible").first,
+            *[
+                page.get_by_role("button", name=re.compile(pattern, re.I)).first
+                for pattern in (r"Apply", r"Show results", r"Update", r"Done")
+            ],
+        ):
+            try:
+                if await target.count() == 0:
+                    continue
+                await target.click(timeout=1500)
+                await page.wait_for_timeout(500)
+                return
+            except Exception:
+                continue
+        try:
+            await page.keyboard.press("Escape")
+        except Exception:
+            pass
+
+    async def _fill_first_visible_date_field(
+        self,
+        page: Page,
+        locators: tuple[Locator, ...],
+        value: str,
+    ) -> None:
+        for locator in locators:
+            try:
+                if await locator.count() == 0:
+                    continue
+                await locator.fill(value, timeout=1200)
+                return
+            except Exception:
+                continue
+
+    async def _rank_document_button_candidates(
+        self, page: Page
+    ) -> list[UsaaDocumentButtonCandidate]:
+        try:
+            raw_candidates = await page.eval_on_selector_all(
+                "button[data-testid^='readDocument-']",
+                """buttons => {
+                    const normalize = value =>
+                        (value || '').replace(/\\s+/g, ' ').trim();
+                    const textOf = node => normalize(node && (node.innerText || node.textContent));
+                    const actionish = text =>
+                        /^(actions?|options?|view|download|read|open)$/i.test(text || '');
+                    return buttons.map((button, index) => {
+                        const row = button.closest(
+                            'tr, [role="row"], [data-testid*="row"], li'
+                        ) || button.parentElement;
+                        let cells = [];
+                        if (row) {
+                            cells = Array.from(row.querySelectorAll(
+                                'th, td, [role="cell"], [role="gridcell"]'
+                            )).map(textOf).filter(Boolean);
+                            if (!cells.length) {
+                                cells = Array.from(row.children || [])
+                                    .map(textOf)
+                                    .filter(Boolean);
+                            }
+                        }
+                        const rowText = textOf(row);
+                        const buttonText = textOf(button);
+                        const datePattern = /\\b\\d{1,2}\\/\\d{1,2}\\/\\d{4}\\b/;
+                        const dateMatch = rowText.match(datePattern);
+                        const accountPattern = /\\*+\\s*-?\\s*\\d{2,6}\\b/;
+                        let title = buttonText;
+                        if (!title || actionish(title)) {
+                            title = cells.find(cell =>
+                                !actionish(cell)
+                                && !datePattern.test(cell)
+                                && !accountPattern.test(cell)
+                            ) || rowText.split(/\\n/)[0] || buttonText;
+                        }
+                        const account = cells.find(cell => accountPattern.test(cell))
+                            || (rowText.match(accountPattern) || [''])[0];
+                        return {
+                            index,
+                            title,
+                            buttonText,
+                            dateDelivered: (cells.find(cell => datePattern.test(cell))
+                                || (dateMatch && dateMatch[0])
+                                || ''),
+                            account: account || '',
+                            rowText,
+                        };
+                    });
+                }""",
+            )
+        except Exception as e:
+            log.info("usaa: could not inspect document button rows: %s", e)
+            return []
+        return self._rank_usaa_document_button_candidates(raw_candidates)
+
+    async def _fetch_targeted_policy_documents(
+        self,
+        page: Page,
+        http: httpx.AsyncClient,
+        ctx: BrowserContext,
+    ) -> tuple[list[Document], dict[str, bytes]]:
+        all_docs: list[Document] = []
+        all_doc_bytes: dict[str, bytes] = {}
+        seen: set[str] = set()
+        selected_policy_keys: set[str] = set()
+
+        async def merge(
+            docs: list[Document],
+            doc_bytes: dict[str, bytes],
+        ) -> None:
+            before = len(all_docs)
+            self._merge_documents(all_docs, all_doc_bytes, seen, docs, doc_bytes)
+            if len(all_docs) > before:
+                await self._emit_documents_progress(all_docs, all_doc_bytes)
+
+        for url in DOCUMENT_CENTER_URL_CANDIDATES:
+            try:
+                await page.goto(url, wait_until="domcontentloaded", timeout=15000)
+                self.mark_timing("document_center_loaded")
+                if "logon" in page.url.lower() or "login" in page.url.lower():
+                    continue
+
+                if not await self._looks_like_document_center(page):
+                    continue
+
+                if not await self._wait_for_document_center_ready(page):
+                    continue
+
+                account_filter_values = (
+                    await self._document_center_account_filter_values(page)
+                )
+                for account_filter_value in account_filter_values:
+                    await self._widen_document_center_date_filter(
+                        page, account_filter_value=account_filter_value
+                    )
+                    for term in POLICY_DOCUMENT_SEARCH_TERMS:
+                        docs, doc_bytes = await self._fetch_document_search_results(
+                            page,
+                            http,
+                            ctx,
+                            term,
+                            selected_policy_keys=selected_policy_keys,
+                        )
+                        await merge(docs, doc_bytes)
+                if all_docs:
+                    return all_docs, all_doc_bytes
+
+                await self._widen_document_center_date_filter(page)
+                for term in POLICY_DOCUMENT_SEARCH_TERMS:
+                    docs, doc_bytes = await self._fetch_document_search_results(
+                        page,
+                        http,
+                        ctx,
+                        term,
+                        selected_policy_keys=selected_policy_keys,
+                    )
+                    await merge(docs, doc_bytes)
+                if all_docs:
+                    return all_docs, all_doc_bytes
+            except Exception as e:
+                log.warning("usaa: targeted document center path %s failed: %s", url, e)
+                continue
+
+        return all_docs, all_doc_bytes
+
+    async def _fetch_document_search_results(
+        self,
+        page: Page,
+        http: httpx.AsyncClient,
+        ctx: BrowserContext,
+        term: str,
+        *,
+        selected_policy_keys: set[str],
+    ) -> tuple[list[Document], dict[str, bytes]]:
+        if not await self._search_document_center_by_title(page, term):
+            return [], {}
+        self.mark_timing(f"document_search_{term.lower().replace(' ', '_')}")
+        return await self._fetch_document_buttons(
+            page,
+            http,
+            ctx,
+            selected_policy_keys=selected_policy_keys,
+            fallback_all=False,
+            emit_progress=False,
+        )
+
     async def _fetch_document_buttons(
         self,
         page: Page,
         http: httpx.AsyncClient,
         ctx: BrowserContext,
+        *,
+        selected_policy_keys: set[str] | None = None,
+        fallback_all: bool = True,
+        emit_progress: bool = True,
     ) -> tuple[list[Document], dict[str, bytes]]:
         buttons = page.locator("button[data-testid^='readDocument-']")
         count = await buttons.count()
@@ -907,15 +1457,46 @@ class UsaaFlow(CarrierFlow):
         all_docs: list[Document] = []
         all_doc_bytes: dict[str, bytes] = {}
         seen: set[str] = set()
-        for idx in range(count):
+        successful_policy_keys = selected_policy_keys
+        if successful_policy_keys is None:
+            successful_policy_keys = set()
+        candidates = await self._rank_document_button_candidates(page)
+        if not candidates and fallback_all:
+            candidates = [
+                UsaaDocumentButtonCandidate(
+                    index=idx,
+                    title=f"USAA document {idx + 1}",
+                    date_delivered="",
+                    account="",
+                    policy_key=f"fallback:{idx}",
+                    document_kind="fallback",
+                    row_text="",
+                )
+                for idx in range(count)
+            ]
+        if not candidates:
+            return [], {}
+
+        for candidate in candidates:
+            if candidate.index >= count:
+                continue
+            if (
+                candidate.document_kind != "fallback"
+                and candidate.policy_key in successful_policy_keys
+            ):
+                continue
             await self._close_document_viewer(page)
-            button = buttons.nth(idx)
+            button = buttons.nth(candidate.index)
             try:
                 name = (
                     await button.inner_text(timeout=2000)
-                ).strip() or f"USAA document {idx + 1}"
+                ).strip() or candidate.title or f"USAA document {candidate.index + 1}"
             except Exception:
-                name = f"USAA document {idx + 1}"
+                name = candidate.title or f"USAA document {candidate.index + 1}"
+            if candidate.title and (
+                not name or self._is_actionish_document_button_text(name)
+            ):
+                name = candidate.title
 
             try:
                 href = await self._direct_document_href(button)
@@ -929,7 +1510,12 @@ class UsaaFlow(CarrierFlow):
                         self._merge_documents(
                             all_docs, all_doc_bytes, seen, docs, doc_bytes
                         )
-                        await self._emit_documents_progress(all_docs, all_doc_bytes)
+                        if candidate.document_kind != "fallback":
+                            successful_policy_keys.add(candidate.policy_key)
+                        if emit_progress:
+                            await self._emit_documents_progress(
+                                all_docs, all_doc_bytes
+                            )
                         continue
 
                 payload = await self._click_for_first_document(
@@ -943,9 +1529,17 @@ class UsaaFlow(CarrierFlow):
                     self._merge_documents(
                         all_docs, all_doc_bytes, seen, docs, doc_bytes
                     )
-                    await self._emit_documents_progress(all_docs, all_doc_bytes)
+                    if candidate.document_kind != "fallback":
+                        successful_policy_keys.add(candidate.policy_key)
+                    if emit_progress:
+                        await self._emit_documents_progress(all_docs, all_doc_bytes)
             except Exception as e:
-                log.warning("usaa: document button %s failed: %s", idx, e)
+                log.warning(
+                    "usaa: document button %s (%s) failed: %s",
+                    candidate.index,
+                    candidate.title,
+                    e,
+                )
         return all_docs, all_doc_bytes
 
     async def _fetch_named_document_actions(
@@ -1272,6 +1866,175 @@ class UsaaFlow(CarrierFlow):
             )
             target_docs.append(doc)
             target_bytes[doc_id] = body
+
+    @classmethod
+    def _rank_usaa_document_button_candidates(
+        cls, raw_candidates: list[dict]
+    ) -> list[UsaaDocumentButtonCandidate]:
+        candidates: list[UsaaDocumentButtonCandidate] = []
+        for raw in raw_candidates:
+            title = cls._best_usaa_document_title(raw)
+            document_kind = cls._usaa_policy_document_kind(title)
+            if document_kind is None:
+                continue
+            account = cls._normalize_usaa_text(str(raw.get("account") or ""))
+            row_text = cls._normalize_usaa_text(str(raw.get("rowText") or ""))
+            candidates.append(
+                UsaaDocumentButtonCandidate(
+                    index=int(raw.get("index") or 0),
+                    title=title,
+                    date_delivered=cls._normalize_usaa_text(
+                        str(raw.get("dateDelivered") or "")
+                    ),
+                    account=account,
+                    policy_key=cls._usaa_policy_key(title, account, row_text),
+                    document_kind=document_kind,
+                    row_text=row_text,
+                )
+            )
+
+        candidates.sort(
+            key=lambda candidate: (
+                -cls._usaa_date_sort_value(
+                    candidate.date_delivered or candidate.row_text
+                ),
+                cls._usaa_document_kind_priority(candidate.document_kind),
+                candidate.index,
+            )
+        )
+        return candidates
+
+    @classmethod
+    def _select_first_unique_usaa_document_candidates(
+        cls,
+        raw_candidates: list[dict],
+        selected_policy_keys: set[str] | None = None,
+    ) -> list[UsaaDocumentButtonCandidate]:
+        seen = set(selected_policy_keys or ())
+        selected: list[UsaaDocumentButtonCandidate] = []
+        for candidate in cls._rank_usaa_document_button_candidates(raw_candidates):
+            if candidate.policy_key in seen:
+                continue
+            selected.append(candidate)
+            seen.add(candidate.policy_key)
+        return selected
+
+    @classmethod
+    def _best_usaa_document_title(cls, raw: dict) -> str:
+        title = cls._normalize_usaa_text(str(raw.get("title") or ""))
+        button_text = cls._normalize_usaa_text(str(raw.get("buttonText") or ""))
+        if not title or cls._is_actionish_document_button_text(title):
+            title = button_text
+        if not title or cls._is_actionish_document_button_text(title):
+            row_text = cls._normalize_usaa_text(str(raw.get("rowText") or ""))
+            pieces = re.split(r"\s{2,}|\n", row_text)
+            for piece in pieces:
+                piece = cls._normalize_usaa_text(piece)
+                if (
+                    piece
+                    and not cls._is_actionish_document_button_text(piece)
+                    and not re.fullmatch(r"\d{1,2}/\d{1,2}/\d{4}", piece)
+                    and not re.fullmatch(r"\*+\s*-?\s*\d{2,6}", piece)
+                ):
+                    title = piece
+                    break
+        return title
+
+    @staticmethod
+    def _normalize_usaa_text(value: str) -> str:
+        return re.sub(r"\s+", " ", value or "").strip()
+
+    @staticmethod
+    def _is_actionish_document_button_text(value: str) -> bool:
+        return bool(
+            re.fullmatch(
+                r"(actions?|options?|view|download|read|open)",
+                (value or "").strip(),
+                flags=re.I,
+            )
+        )
+
+    @staticmethod
+    def _usaa_policy_document_kind(title: str) -> str | None:
+        lowered = title.lower()
+        if re.search(
+            r"\b("
+            r"declarations?|declaration page|initial|new policy|new business|"
+            r"policy start|start of policy|policy packet|policy documents?"
+            r")\b",
+            lowered,
+        ):
+            if re.search(r"\b(bill|billing|statement|payment|invoice)\b", lowered):
+                return None
+            return "initial"
+        if re.search(r"\brenew(?:al)?\b", lowered):
+            return "renewal"
+        if re.search(r"\bchange\b", lowered) and re.search(r"\bpolicy\b", lowered):
+            return "change"
+        return None
+
+    @staticmethod
+    def _usaa_document_kind_priority(kind: str) -> int:
+        return {
+            "initial": 0,
+            "renewal": 1,
+            "change": 2,
+            "fallback": 3,
+        }.get(kind, 4)
+
+    @classmethod
+    def _usaa_policy_key(cls, title: str, account: str, row_text: str = "") -> str:
+        family = cls._usaa_policy_family(f"{title} {row_text}")
+        tail = cls._usaa_masked_account_tail(account) or cls._usaa_masked_account_tail(
+            title
+        )
+        if tail:
+            return f"{family}:{tail}"
+
+        base = f" {title.lower()} "
+        base = re.sub(r"\b\d{1,2}/\d{1,2}/\d{4}\b", " ", base)
+        base = re.sub(r"\*+\s*-?\s*\d{2,6}\b", " ", base)
+        base = re.sub(
+            r"\b("
+            r"renewal|declarations?|declaration|page|initial|new|business|start|"
+            r"of|policy|insurance|documents?|packet|auto|automobile|vehicle|"
+            r"renters?|homeowners?|home|condo|property|id|cards?"
+            r")\b",
+            " ",
+            base,
+        )
+        base = re.sub(r"[^a-z0-9]+", " ", base).strip()
+        return f"{family}:{base or family}"
+
+    @staticmethod
+    def _usaa_policy_family(value: str) -> str:
+        lowered = value.lower()
+        if re.search(r"\b(auto|automobile|vehicle)\b", lowered):
+            return "auto"
+        if re.search(r"\brenters?\b", lowered):
+            return "renters"
+        if re.search(r"\bhomeowners?\b", lowered):
+            return "homeowners"
+        if re.search(r"\bcondo\b", lowered):
+            return "condo"
+        if re.search(r"\b(property|dwelling|home)\b", lowered):
+            return "property"
+        return "policy"
+
+    @staticmethod
+    def _usaa_masked_account_tail(value: str) -> str | None:
+        match = re.search(r"\*+\s*-?\s*(\d{2,6})\b", value or "")
+        if not match:
+            return None
+        return match.group(1)
+
+    @staticmethod
+    def _usaa_date_sort_value(value: str) -> int:
+        match = re.search(r"\b(\d{1,2})/(\d{1,2})/(\d{4})\b", value or "")
+        if not match:
+            return 0
+        month, day, year = (int(part) for part in match.groups())
+        return year * 10000 + month * 100 + day
 
     async def _extract_document_from_page(
         self, page: Page, http: httpx.AsyncClient

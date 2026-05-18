@@ -1,3 +1,5 @@
+import asyncio
+
 from backend.carriers import usaa
 from backend.carriers.usaa import UsaaFlow
 from backend.config import settings
@@ -45,6 +47,171 @@ def test_usaa_merge_documents_dedupes_and_renumbers():
         "usaa-doc-0": b"%PDF one",
         "usaa-doc-1": b"%PDF two",
     }
+
+
+def test_usaa_selects_latest_unique_renewal_per_policy():
+    rows = [
+        {
+            "index": 0,
+            "title": "Renters Policy Renewal",
+            "dateDelivered": "05/12/2026",
+            "account": "*-002",
+            "rowText": "Renters Policy Renewal 05/12/2026 *-002 Options",
+        },
+        {
+            "index": 1,
+            "title": "Automobile Policy *********-7104 Renewal / Auto ID Cards",
+            "dateDelivered": "06/11/2025",
+            "account": "",
+            "rowText": (
+                "Automobile Policy *********-7104 Renewal / Auto ID Cards "
+                "06/11/2025 Options"
+            ),
+        },
+        {
+            "index": 2,
+            "title": "Renters Policy *********-002 Renewal",
+            "dateDelivered": "05/12/2025",
+            "account": "*-002",
+            "rowText": "Renters Policy *********-002 Renewal 05/12/2025 *-002 Options",
+        },
+        {
+            "index": 3,
+            "title": "Automobile Policy *********-7104 Renewal / Auto ID Cards",
+            "dateDelivered": "12/11/2024",
+            "account": "*7104",
+            "rowText": (
+                "Automobile Policy *********-7104 Renewal / Auto ID Cards "
+                "12/11/2024 *7104 Options"
+            ),
+        },
+    ]
+
+    selected = UsaaFlow._select_first_unique_usaa_document_candidates(rows)
+
+    assert [candidate.index for candidate in selected] == [0, 1]
+    assert [candidate.policy_key for candidate in selected] == [
+        "renters:002",
+        "auto:7104",
+    ]
+
+
+def test_usaa_declaration_docs_are_initial_policy_candidates():
+    rows = [
+        {
+            "index": 0,
+            "title": "Auto and Property Insurance Statement",
+            "dateDelivered": "05/01/2026",
+            "account": "*-002",
+            "rowText": "Auto and Property Insurance Statement 05/01/2026 *-002",
+        },
+        {
+            "index": 1,
+            "title": "Homeowners Policy Declarations",
+            "dateDelivered": "03/10/2021",
+            "account": "*-884",
+            "rowText": "Homeowners Policy Declarations 03/10/2021 *-884 Options",
+        },
+        {
+            "index": 2,
+            "title": "Automobile Insurance Policy Declarations",
+            "dateDelivered": "12/11/2020",
+            "account": "*7104",
+            "rowText": "Automobile Insurance Policy Declarations 12/11/2020 *7104",
+        },
+    ]
+
+    selected = UsaaFlow._select_first_unique_usaa_document_candidates(rows)
+
+    assert [candidate.index for candidate in selected] == [1, 2]
+    assert [candidate.document_kind for candidate in selected] == [
+        "initial",
+        "initial",
+    ]
+
+
+def test_usaa_latest_policy_packet_preferred_for_same_policy():
+    rows = [
+        {
+            "index": 0,
+            "title": "Automobile Insurance Policy Declarations",
+            "dateDelivered": "12/11/2024",
+            "account": "*7104",
+            "rowText": "Automobile Insurance Policy Declarations 12/11/2024 *7104",
+        },
+        {
+            "index": 1,
+            "title": "Automobile Policy *********-7104 Renewal / Auto ID Cards",
+            "dateDelivered": "06/11/2025",
+            "account": "",
+            "rowText": (
+                "Automobile Policy *********-7104 Renewal / Auto ID Cards "
+                "06/11/2025 *7104 Options"
+            ),
+        },
+    ]
+
+    selected = UsaaFlow._select_first_unique_usaa_document_candidates(rows)
+
+    assert [candidate.index for candidate in selected] == [1]
+
+
+def test_usaa_short_renew_title_counts_as_policy_renewal():
+    rows = [
+        {
+            "index": 0,
+            "title": "PC AUTO POL - RENEW",
+            "dateDelivered": "12/11/2025",
+            "account": "*7104",
+            "rowText": "PC AUTO POL - RENEW 12/11/2025 *7104 Options",
+        }
+    ]
+
+    selected = UsaaFlow._select_first_unique_usaa_document_candidates(rows)
+
+    assert len(selected) == 1
+    assert selected[0].document_kind == "renewal"
+    assert selected[0].policy_key == "auto:7104"
+
+
+def test_usaa_live_shape_selects_latest_available_policy_packets():
+    rows = [
+        {
+            "index": 0,
+            "title": "Renters Policy Renewal",
+            "dateDelivered": "05/12/2026",
+            "account": "*-002",
+            "rowText": "Renters Policy Renewal 05/12/2026 *-002 Options",
+        },
+        {
+            "index": 1,
+            "title": "PC AUTO POL - RENEW",
+            "dateDelivered": "12/11/2025",
+            "account": "*7104",
+            "rowText": "PC AUTO POL - RENEW 12/11/2025 *7104 Options",
+        },
+        {
+            "index": 2,
+            "title": "Automobile Policy *********-7104 Renewal / Auto ID Cards",
+            "dateDelivered": "06/10/2023",
+            "account": "*7104",
+            "rowText": (
+                "Automobile Policy *********-7104 Renewal / Auto ID Cards "
+                "06/10/2023 *7104 Options"
+            ),
+        },
+        {
+            "index": 3,
+            "title": "Renters Policy *********-002 Renewal",
+            "dateDelivered": "05/11/2022",
+            "account": "*-002",
+            "rowText": "Renters Policy *********-002 Renewal 05/11/2022 *-002 Options",
+        },
+    ]
+
+    selected = UsaaFlow._select_first_unique_usaa_document_candidates(rows)
+
+    assert [candidate.index for candidate in selected] == [0, 1]
 
 
 def test_usaa_timing_snapshot_uses_first_label_occurrence():
@@ -138,12 +305,85 @@ def test_usaa_unavailable_block_detection():
 
 def test_usaa_debug_html_redacts_password_values():
     html = (
-        '<input name="memberId" value="cordwell">'
+        '<input name="memberId" value="demo-user">'
         '<input name="password" type="password" value="secret">'
     )
 
     sanitized = UsaaFlow._sanitize_debug_html(html)
 
-    assert 'value="cordwell"' in sanitized
+    assert 'value="demo-user"' in sanitized
     assert "secret" not in sanitized
     assert 'value="[redacted]"' in sanitized
+
+
+def test_usaa_os_browser_fill_retries_until_value_matches(monkeypatch):
+    flow = UsaaFlow()
+    calls: list[str] = []
+    matches = iter((False, True))
+
+    async def focus(selector: str, port: int) -> None:
+        calls.append(f"focus:{selector}:{port}")
+
+    async def paste(value: str) -> None:
+        calls.append(f"paste:{len(value)}")
+
+    async def value_matches(selector: str, value: str, port: int) -> bool:
+        calls.append(f"match:{selector}:{port}:{len(value)}")
+        return next(matches)
+
+    async def fallback(selector: str, value: str, port: int) -> None:
+        raise AssertionError("DOM fallback should not run after a successful paste")
+
+    monkeypatch.setattr(flow, "_focus_chrome_selector", focus)
+    monkeypatch.setattr(flow, "_replace_focused_text", paste)
+    monkeypatch.setattr(flow, "_chrome_selector_value_matches", value_matches)
+    monkeypatch.setattr(flow, "_set_chrome_selector_value", fallback)
+
+    asyncio.run(
+        flow._replace_chrome_selector_text(
+            "input[type='password']", "secret", 9222, field_label="password"
+        )
+    )
+
+    assert calls == [
+        "focus:input[type='password']:9222",
+        "paste:6",
+        "match:input[type='password']:9222:6",
+        "focus:input[type='password']:9222",
+        "paste:6",
+        "match:input[type='password']:9222:6",
+    ]
+
+
+def test_usaa_os_browser_fill_uses_dom_fallback_after_failed_pastes(monkeypatch):
+    flow = UsaaFlow()
+    paste_count = 0
+    fallback_calls: list[tuple[str, int, int]] = []
+    matches = iter((False, False, False, True))
+
+    async def focus(selector: str, port: int) -> None:
+        pass
+
+    async def paste(value: str) -> None:
+        nonlocal paste_count
+        paste_count += 1
+
+    async def value_matches(selector: str, value: str, port: int) -> bool:
+        return next(matches)
+
+    async def fallback(selector: str, value: str, port: int) -> None:
+        fallback_calls.append((selector, len(value), port))
+
+    monkeypatch.setattr(flow, "_focus_chrome_selector", focus)
+    monkeypatch.setattr(flow, "_replace_focused_text", paste)
+    monkeypatch.setattr(flow, "_chrome_selector_value_matches", value_matches)
+    monkeypatch.setattr(flow, "_set_chrome_selector_value", fallback)
+
+    asyncio.run(
+        flow._replace_chrome_selector_text(
+            "input[type='password']", "secret", 9222, field_label="password"
+        )
+    )
+
+    assert paste_count == 3
+    assert fallback_calls == [("input[type='password']", 6, 9222)]

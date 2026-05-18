@@ -1,204 +1,247 @@
-# Infer Take-Home — Carrier Portal Document Puller
+# Carrier Doc Puller
 
-A small web app that signs into a personal-lines auto insurance carrier portal, handles MFA in-flow, and pulls policy documents back to the browser.
-
-> Reviewer notes: see [ASSIGNMENT.md](./ASSIGNMENT.md) for the prompt, [ARCHITECTURE.md](./ARCHITECTURE.md) for the design. **You can run the full UI flow without credentials** via the mock carrier mode below.
+Small FastAPI + Playwright web app for pulling policy documents from personal-lines carrier portals.
 
 Hosted demo: https://infer.discordwell.com
 
-## Stack
+## What It Does
 
-- **Backend:** Python 3.11+ • FastAPI • Playwright (async) • httpx • Server-Sent Events
-- **Frontend:** vanilla HTML / CSS / JS (single file each, no build step)
-- **Active carriers:** USAA and Geico. Progressive / Allstate / State Farm / Mercury have experimental generic adapters for credential-driven fallback validation.
+The app exposes a simple browser UI:
 
-## Quickstart
+1. Pick a carrier.
+2. Enter the portal username and password.
+3. The backend drives the carrier login in Playwright.
+4. If the carrier asks for MFA, the UI shows a code field and submits the code back to the running backend session.
+5. The backend fetches policy documents and the UI renders the PDFs inline.
+
+The important backend contract is stable:
+
+- `POST /api/login` starts the carrier automation.
+- `GET /api/status/{session_id}` streams state with Server-Sent Events.
+- `POST /api/mfa/{session_id}` submits an MFA code.
+- `GET /api/docs/{session_id}/{doc_id}` streams the fetched PDF bytes.
+
+## Current Carrier Status
+
+- **Mercury:** working live path. The app expands Document History groups, selects the visible `Auto Insurance Policy Declarations` row, captures Mercury's `Document/V1` PDF payload, and renders the declarations PDF.
+- **USAA:** implemented, but bot-sensitive. Hosted USAA is proxied to a trusted local worker because login is more reliable from a real local Chrome profile. The document fetcher opens Document Center, widens the date range, filters each policy account, and returns the latest policy packet/renewal per policy type while ignoring billing statements.
+- **Geico:** adapter exists as a secondary fallback.
+- **Progressive, Allstate, State Farm:** experimental generic adapters.
+- **Mock mode:** deterministic no-credentials path for local review and tests.
+
+Production currently runs Mercury directly on OVH. Only USAA is proxied through the local worker/tunnel.
+
+## Prerequisites
+
+- Python 3.11+
+- `uv`
+- Playwright Chromium:
 
 ```bash
-uv sync                              # installs deps (uv 0.10+)
-uv run playwright install chromium   # ~150 MB browser download
-uv run uvicorn backend.main:app --port 8000
-# open http://localhost:8000
+uv sync
+uv run playwright install chromium
 ```
 
-For the live USAA flow, Google Chrome must be installed locally. The OVH Docker image includes Chrome + Xvfb.
+For USAA live runs, install Google Chrome locally. The default USAA flow uses a real Chrome profile for the sensitive login step.
 
-For live carrier flows, fill `.env` first:
+## Local Server Setup
+
+Install dependencies once:
+
+```bash
+uv sync
+uv run playwright install chromium
+```
+
+Create a local env file for live runs:
 
 ```bash
 cp .env.example .env
-# set credentials for the carrier you are testing, e.g.
-# USAA_USERNAME / USAA_PASSWORD, GEICO_USERNAME / GEICO_PASSWORD,
-# MERCURY_USERNAME / MERCURY_PASSWORD, etc.
 ```
 
-## Run modes
+Then edit `.env` with only the credentials you intend to test, for example:
 
-### Mock mode (no credentials needed — great for reviewers)
-
-```bash
-CARRIER_MOCK=1 uv run uvicorn backend.main:app --port 8000
+```dotenv
+USAA_USERNAME=...
+USAA_PASSWORD=...
+USAA_MFA_EMAIL=you@example.com
+MERCURY_USERNAME=...
+MERCURY_PASSWORD=...
 ```
 
-The Playwright flow is replaced with `MockFlow`: it sleeps ~1s total, requests an MFA code from the UI, then returns three valid 503-byte PDFs. This exercises every code path (state machine, SSE, MFA round-trip, session reuse) without a real carrier round-trip. Reviewers can:
-
-1. Pick USAA or Geico
-2. Enter anything for username / password (e.g. `demo@example.com` / `pw`)
-3. Submit, then enter any MFA code
-4. See three docs render inline with an end-to-end latency readout
-
-To exercise edge cases:
+Run the FastAPI server from the repo root:
 
 ```bash
-MOCK_BAD_PASSWORD=1 CARRIER_MOCK=1 uv run uvicorn backend.main:app  # surfaces the error UI
-MOCK_SKIP_MFA=1   CARRIER_MOCK=1 uv run uvicorn backend.main:app   # carrier-trusts-device path
+uv run uvicorn backend.main:app --host 127.0.0.1 --port 8000
 ```
 
-### Live carrier mode
+Open http://127.0.0.1:8000. The same server serves the UI and API.
 
-With real credentials in `.env`, run plain `uvicorn` (no `CARRIER_MOCK`). USAA defaults to `USAA_LOGIN_DRIVER=os_browser`: the local worker launches real Chrome with a dedicated profile, uses macOS AppleScript/System Events for the sensitive username/password step, then attaches over CDP after login reaches MFA or an authenticated page. Set `USAA_LOGIN_DRIVER=playwright` to force the older all-Playwright path for debugging. The first run does full login + email/phone MFA + doc fetch. The second run (same username) tries the stored `storage_state` quick path.
+Useful environment toggles:
 
-### Hosted worker mode
+- `CARRIER_MOCK=1`: no live carrier login; deterministic mock docs.
+- `DEV_PREFILL_CREDS=1`: prefill credentials from `.env` in the local UI.
+- `WORKER_PROXY_CARRIERS=usaa`: only USAA proxies to a worker; other carriers run in this process.
+- `USAA_QUICK_PATH_MAX_AGE_SECONDS=0`: force a fresh USAA login instead of stored-session reuse.
+- `USAA_LOGIN_DRIVER=os_browser`: use real local Chrome for USAA credential submission.
+- `USAA_OS_BROWSER_PROFILE_DIR=storage/browser-profiles/<name>`: choose the Chrome profile used by the USAA OS-browser path.
 
-If a carrier rejects the hosted server before MFA or the hosted Chrome runtime is
-too brittle, keep the public app hosted and run carrier automation on a trusted
-local machine:
+## Run Locally
+
+### No Credentials: Mock Mode
+
+Use this for a quick local verification of the full UI, MFA, SSE, and PDF-rendering flow:
 
 ```bash
-# local/residential worker
+CARRIER_MOCK=1 \
+WORKER_BASE_URL= \
+USAA_WORKER_BASE_URL= \
+uv run uvicorn backend.main:app --host 127.0.0.1 --port 8000
+```
+
+Open http://127.0.0.1:8000 and:
+
+1. Pick any carrier.
+2. Enter any username and password.
+3. Enter any MFA code when prompted.
+4. Confirm the mock PDFs render.
+
+Mock edge cases:
+
+```bash
+MOCK_BAD_PASSWORD=1 CARRIER_MOCK=1 uv run uvicorn backend.main:app
+MOCK_BAD_MFA=1      CARRIER_MOCK=1 uv run uvicorn backend.main:app
+MOCK_SKIP_MFA=1     CARRIER_MOCK=1 uv run uvicorn backend.main:app
+```
+
+### Live Mercury Locally
+
+Create a local env file and fill credentials:
+
+```bash
+cp .env.example .env
+# set MERCURY_USERNAME and MERCURY_PASSWORD
+```
+
+Run the app:
+
+```bash
+WORKER_BASE_URL= \
+USAA_WORKER_BASE_URL= \
+WORKER_PROXY_CARRIERS=usaa \
+uv run uvicorn backend.main:app --host 127.0.0.1 --port 8000
+```
+
+Then open http://127.0.0.1:8000, choose Mercury, and submit the credentials. Mercury should run directly in the local Playwright browser; no tunnel is needed.
+
+### Live USAA Locally
+
+USAA defaults to `USAA_LOGIN_DRIVER=os_browser`, which launches real Chrome with a dedicated profile:
+
+```bash
+cp .env.example .env
+# set USAA_USERNAME and USAA_PASSWORD
+uv run uvicorn backend.main:app --host 127.0.0.1 --port 8000
+```
+
+If macOS blocks the OS-browser step, grant Accessibility permission to the terminal/Codex app that runs `uvicorn`.
+
+Fresh local USAA e2e run, bypassing stored session reuse:
+
+```bash
+CARRIER_MOCK=false \
+DEV_PREFILL_CREDS=false \
+WORKER_BASE_URL= \
+USAA_WORKER_BASE_URL= \
+WORKER_PROXY_CARRIERS= \
+USAA_QUICK_PATH_MAX_AGE_SECONDS=0 \
+USAA_LOGIN_DRIVER=os_browser \
+USAA_OS_BROWSER_PROFILE_DIR=storage/browser-profiles/usaa-local-e2e \
+PLAYWRIGHT_HEADLESS=false \
+uv run uvicorn backend.main:app --host 127.0.0.1 --port 8053
+```
+
+Open http://127.0.0.1:8053, choose USAA, enter credentials, complete MFA in the UI, and verify the rendered PDFs. For the current USAA account shape, the expected result is one latest auto policy packet and one latest renters/property policy packet.
+
+## Hosted Worker Mode
+
+The public site can proxy selected carrier automation to a trusted local worker. This is currently used for USAA only.
+
+Local worker:
+
+```bash
 uv run uvicorn backend.main:app --host 127.0.0.1 --port 8040
+```
 
-# separate terminal: expose only that worker to the hosted server
+Reverse tunnel from local machine to OVH:
+
+```bash
 ssh -N -R 127.0.0.1:8041:127.0.0.1:8040 ovh2
 ```
 
-Then set this on the hosted app:
+Hosted env:
 
 ```bash
-WORKER_BASE_URL=http://host.docker.internal:8041
+USAA_WORKER_BASE_URL=http://host.docker.internal:8041
 WORKER_PROXY_CARRIERS=usaa
 ```
 
-`USAA_WORKER_BASE_URL` remains supported as a backwards-compatible alias for
-`WORKER_BASE_URL`. The frontend and public API do not change. The hosted app
-proxies selected carrier `/api/login`, `/api/status`, `/api/mfa`, and
-`/api/docs` calls to the local worker while other carriers still run normally
-on the hosted backend. Use `WORKER_PROXY_CARRIERS=all` or a comma list such as
-`usaa,geico,progressive` when the next live credential should also run through
-the local worker.
+With that config:
 
-For the default USAA OS-browser driver, the local macOS worker needs Chrome
-installed and Accessibility permission granted to the terminal/Codex app that
-runs `uvicorn`.
+- USAA runs on the local worker.
+- Mercury and other non-proxied carriers run inside the hosted OVH container.
 
-## Run flow
-
-1. Pick a carrier from the dropdown.
-2. Enter portal username + password, submit.
-3. When MFA is required, the UI surfaces a code input. Enter the SMS/email code.
-4. Policy documents render inline (PDF preview + download button per doc).
-5. Subsequent runs for the same user reuse the saved session and **skip MFA** if it's still valid.
-
-Total post-MFA latency (carrier-side network + Playwright + doc download + render) is the target metric; the UI shows it in milliseconds when docs land.
+Use `WORKER_PROXY_CARRIERS=all` only when every carrier should route through the local worker.
 
 ## Tests
 
+Regular suite:
+
 ```bash
-uv run pytest                                      # no Chromium for the regular suite
-RUN_LIVE_SMOKE=1 uv run pytest tests/test_usaa_smoke.py -v -s   # interactive
-RUN_LIVE_SMOKE=1 uv run pytest tests/test_geico_smoke.py -v -s  # interactive
-uv run python -m scripts.run_usaa_once                         # live USAA helper
+uv run pytest
 ```
 
-The smoke test launches real Chromium, prompts on stdin for the MFA code, and asserts ≥1 PDF is returned. It is skipped automatically when creds aren't set.
+Live smoke tests are opt-in and require credentials:
 
-## Project layout
-
+```bash
+RUN_LIVE_SMOKE=1 uv run pytest tests/test_usaa_smoke.py -v -s
+RUN_LIVE_SMOKE=1 uv run pytest tests/test_geico_smoke.py -v -s
 ```
+
+## Project Layout
+
+```text
 backend/
-  main.py              # FastAPI app, routes, SSE
-  session_manager.py   # state machine + asyncio events
-  storage.py           # disk-persist Playwright storage_state by sha256(carrier+user)
-  orchestrator.py      # drives the full login→MFA→docs flow
-  playwright_runner.py # shared Playwright + Chromium lifecycle
-  models.py            # Pydantic schemas
-  config.py            # env-loaded settings
+  main.py              FastAPI routes, SSE, frontend serving
+  orchestrator.py      login -> MFA -> document flow
+  session_manager.py   in-process session state and events
+  storage.py           Playwright storage_state persistence
+  playwright_runner.py shared Playwright/Chrome lifecycle
   carriers/
-    base.py            # CarrierFlow ABC
-    usaa.py            # USAA-specific Playwright flow
-    geico.py           # Geico-specific Playwright flow
-    generic_portal.py  # experimental Progressive/State Farm/Allstate/Mercury fallback
-    mock.py            # MockFlow for testing without creds
-    registry.py        # carrier → flow lookup
+    usaa.py            USAA-specific flow
+    geico.py           Geico-specific flow
+    generic_portal.py  Mercury and other generic carrier flows
+    mock.py            no-credentials mock carrier
 frontend/
-  index.html app.js style.css
+  index.html
+  app.js
+  style.css
 tests/
-  conftest.py
-  test_session_manager.py test_storage.py test_integration.py test_geico_smoke.py
+  unit and integration tests
 scripts/
-  inspect_geico.py     # one-shot tool that captures Geico's form selectors
+  live/debug helpers
 ```
 
-## Latency
+## Session Reuse
 
-Target is **< 8s from MFA submit to docs rendered**. USAA is bot-sensitive, so the implementation returns the first verified PDF immediately rather than walking every document row before rendering.
+After a successful live run, Playwright storage state is saved under `storage/sessions/` using a hash of `(carrier, username)`. Later runs for the same carrier and username try that state first. If the carrier still trusts the session, the app skips MFA and goes straight to documents; otherwise it falls back to a full login.
 
-| Step | Estimate |
-|---|---|
-| MFA POST → background task fills code | ~0.3 s |
-| USAA submits + lands on authenticated page | ~1.7 s |
-| Open latest document row and capture PDF | ~4.4 s |
-| SSE event with doc list to client | ~0.1 s |
-| `<embed>` requests PDF bytes from in-memory cache | ~0.5–1.5 s |
-| **Measured USAA run** | **6.34 s to first PDF after MFA** |
+USAA uses a short freshness window for stored state because stale USAA sessions waste live attempts. Other carriers can reuse stored state normally.
 
-Key trick: once Playwright has authenticated, the USAA adapter navigates straight to the real document-center route, clicks the first document row, and races PDF response/download/popup signals. It returns the first verified PDF immediately instead of waiting for page-wide `networkidle` or walking every document row.
+## Notes And Limitations
 
-## Session reuse
-
-After a successful run we persist Playwright's `storage_state` to `storage/sessions/<sha256(carrier+user)>.json`. On the next `POST /api/login` for that same `(carrier, username)`, the orchestrator:
-
-1. Opens a Playwright context with the stored cookies.
-2. Navigates to the carrier's dashboard URL.
-3. If we land on the dashboard (not a login page), skip MFA entirely and go straight to fetching docs.
-4. If the carrier expired the session, fall through to fresh login.
-
-USAA is more conservative: the quick path is only attempted when the saved
-state is fresh, controlled by `USAA_QUICK_PATH_MAX_AGE_SECONDS` and defaulting
-to 300 seconds. Older USAA state goes straight to full login so a stale
-shortcut does not waste a hosted attempt.
-
-This is what makes "reliability and session reuse" measurable in the Loom — back-to-back runs visibly skip MFA on the second one.
-
-Latest USAA local check: stored state skipped MFA and returned one PDF in ~4.81s.
-
-## Known limitations / out of scope
-
-- **Session state on disk is unencrypted.** Demo only — prod should encrypt with an env-key or OS keychain. Trivial to add (~10 lines).
-- **Single-user in-process state.** The session manager assumes one user at a time. Concurrent users would need either a Redis-backed manager or process-per-user.
-- **MFA timeout is 90s.** If the user doesn't type the code in time, the session errors out. No "resend code" flow.
-- **USAA requires headed Chrome.** The default adapter drives a visible local Chrome window for login and writes step screenshots/HTML under `/tmp` when Akamai or the portal shape blocks progress.
-- **HTTPS termination is the deployer's problem.** Local demo is plain HTTP.
-
-## Credentials sourcing
-
-Per the assignment, real credentials must come from someone with a personal-lines policy. This submission used a real USAA account supplied by the user, exercised the email/SMS MFA path, fetched a real PDF, and then verified session reuse on the next run. Geico remains wired as a secondary adapter, but USAA is the measured carrier for the take-home.
-
-## Fallback carrier order
-
-If USAA remains blocked, validate the same UI/backend flow against carriers in
-this order. Mercury moves to the front when those live credentials are
-available.
-
-1. **Mercury** — public account pages advertise policy details, ID cards,
-   digital policy documents, and bills through the customer portal. The login
-   form has simple username/password fields, so it is a good live-credential
-   fallback when credentials are available.
-2. **Geico** — adapter already exists; GEICO publicly documents online account,
-   policy document, and ID card access.
-3. **Progressive** — public docs say declarations pages are available through
-   online account/app.
-4. **State Farm** — public docs advertise policy documents and ID cards in the
-   online account.
-5. **Allstate** — public docs confirm `Policies` -> `Documents`, but account
-   behavior appears more brittle.
+- Credentials should be provided through `.env` or the UI. Do not commit real credentials.
+- Session state is persisted unencrypted under `storage/`; this is acceptable for a local take-home demo, not production.
+- Runtime session management is in-process. Multiple production users would need a shared store such as Redis.
+- The app optimizes for first useful policy PDF visible, then can extend to more document rows as needed.
+- HTTPS termination is handled by the deployment environment; local development is plain HTTP.
