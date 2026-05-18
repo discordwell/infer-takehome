@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import AsyncIterator
 
 import httpx
+from websockets.asyncio.client import connect as websocket_connect
 from playwright.async_api import BrowserContext, Locator, Page
 
 from ..config import settings
@@ -164,8 +165,8 @@ class UsaaFlow(CarrierFlow):
         profile_dir = options.pop("_chrome_profile_dir", str(self._chrome_profile_dir()))
         options["_initial_url"] = LOGIN_URL
 
-        async def before_connect(_port: int, launched_profile_dir: Path) -> None:
-            await self._os_browser_login(username, password, launched_profile_dir)
+        async def before_connect(port: int, launched_profile_dir: Path) -> None:
+            await self._os_browser_login(username, password, launched_profile_dir, port)
 
         async with runner.new_chrome_cdp_context_after(
             chrome_profile_dir=profile_dir,
@@ -197,7 +198,7 @@ class UsaaFlow(CarrierFlow):
         return USAA_CHROME_PROFILE_DIR
 
     async def _os_browser_login(
-        self, username: str, password: str, profile_dir: Path
+        self, username: str, password: str, profile_dir: Path, port: int
     ) -> None:
         if sys.platform != "darwin":
             raise RuntimeError("USAA OS browser login requires macOS local worker")
@@ -211,28 +212,32 @@ class UsaaFlow(CarrierFlow):
         await self._wait_for_chrome_js(
             self._selector_exists_js("input[name='memberId'], input[type='text']"),
             timeout_ms=30000,
+            port=port,
         )
 
-        await self._focus_chrome_selector("input[name='memberId'], input[type='text']")
+        await self._focus_chrome_selector(
+            "input[name='memberId'], input[type='text']", port
+        )
         await self._replace_focused_text(username)
-        await self._focus_chrome_selector("#next-button, button[type='submit']")
+        await self._focus_chrome_selector("#next-button, button[type='submit']", port)
         await self._press_return()
-        await self._dump_os_login_debug("after-username-submit")
+        await self._dump_os_login_debug("after-username-submit", port)
 
         await self._wait_for_chrome_js(
             self._selector_exists_js("input[name='password'], input[type='password']"),
             timeout_ms=45000,
+            port=port,
         )
         await self._focus_chrome_selector(
-            "input[name='password'], input[type='password']"
+            "input[name='password'], input[type='password']", port
         )
         await self._replace_focused_text(password)
-        await self._dump_os_login_debug("after-password-fill")
+        await self._dump_os_login_debug("after-password-fill", port)
 
-        await self._focus_chrome_selector("#next-button, button[type='submit']")
+        await self._focus_chrome_selector("#next-button, button[type='submit']", port)
         await self._press_return()
-        await self._wait_for_os_login_landing()
-        await self._dump_os_login_debug("after-password-submit")
+        await self._wait_for_os_login_landing(port)
+        await self._dump_os_login_debug("after-password-submit", port)
 
     async def _activate_chrome(self) -> None:
         await self._osascript(
@@ -242,7 +247,7 @@ class UsaaFlow(CarrierFlow):
             timeout_ms=5000,
         )
 
-    async def _focus_chrome_selector(self, selector: str) -> None:
+    async def _focus_chrome_selector(self, selector: str, port: int) -> None:
         selector_json = json.dumps(selector)
         focused = await self._chrome_js(
             f"""
@@ -255,6 +260,7 @@ class UsaaFlow(CarrierFlow):
             }})()
             """,
             timeout_ms=5000,
+            port=port,
         )
         if focused.strip().lower() != "true":
             raise RuntimeError(f"USAA OS browser could not focus selector: {selector}")
@@ -280,7 +286,7 @@ class UsaaFlow(CarrierFlow):
             timeout_ms=5000,
         )
 
-    async def _wait_for_os_login_landing(self) -> None:
+    async def _wait_for_os_login_landing(self, port: int) -> None:
         deadline = time.perf_counter() + settings.usaa_os_login_timeout_seconds
         while time.perf_counter() < deadline:
             try:
@@ -296,6 +302,7 @@ class UsaaFlow(CarrierFlow):
                     })()
                     """,
                     timeout_ms=3000,
+                    port=port,
                 )
                 parsed = json.loads(state)
                 body = parsed.get("body", "")
@@ -321,7 +328,7 @@ class UsaaFlow(CarrierFlow):
                 log.debug("usaa: OS-browser landing wait check failed: %s", e)
             await asyncio.sleep(0.5)
 
-    async def _dump_os_login_debug(self, label: str) -> None:
+    async def _dump_os_login_debug(self, label: str, port: int) -> None:
         png = DEBUG_DIR / f"usaa-os-login-{label}.png"
         html = DEBUG_DIR / f"usaa-os-login-{label}.html"
         try:
@@ -340,19 +347,21 @@ class UsaaFlow(CarrierFlow):
             pass
         try:
             outer_html = await self._chrome_js(
-                "document.documentElement.outerHTML", timeout_ms=3000
+                "document.documentElement.outerHTML", timeout_ms=3000, port=port
             )
             html.write_text(self._sanitize_debug_html(outer_html))
         except Exception:
             pass
         log.info("usaa: OS-browser login debug -> %s, %s", png, html)
 
-    async def _wait_for_chrome_js(self, script: str, timeout_ms: int) -> None:
+    async def _wait_for_chrome_js(
+        self, script: str, timeout_ms: int, port: int
+    ) -> None:
         deadline = time.perf_counter() + (timeout_ms / 1000)
         last_error: Exception | None = None
         while time.perf_counter() < deadline:
             try:
-                result = await self._chrome_js(script, timeout_ms=3000)
+                result = await self._chrome_js(script, timeout_ms=3000, port=port)
                 if result.strip().lower() == "true":
                     return
             except Exception as e:
@@ -363,18 +372,53 @@ class UsaaFlow(CarrierFlow):
             message += f": {last_error}"
         raise RuntimeError(message)
 
-    async def _chrome_js(self, script: str, timeout_ms: int) -> str:
-        escaped = self._applescript_string(script)
-        return await self._osascript(
-            f"""
-            tell application "Google Chrome"
-                tell active tab of front window
-                    execute javascript {escaped}
-                end tell
-            end tell
-            """,
-            timeout_ms=timeout_ms,
-        )
+    async def _chrome_js(self, script: str, timeout_ms: int, port: int) -> str:
+        ws_url = await self._cdp_page_ws_url(port, timeout_ms)
+        message = {
+            "id": 1,
+            "method": "Runtime.evaluate",
+            "params": {
+                "expression": script,
+                "awaitPromise": True,
+                "returnByValue": True,
+            },
+        }
+        async with websocket_connect(
+            ws_url,
+            open_timeout=timeout_ms / 1000,
+            close_timeout=1,
+        ) as ws:
+            await ws.send(json.dumps(message))
+            deadline = time.perf_counter() + (timeout_ms / 1000)
+            while time.perf_counter() < deadline:
+                raw = await asyncio.wait_for(
+                    ws.recv(), timeout=max(0.1, deadline - time.perf_counter())
+                )
+                payload = json.loads(raw)
+                if payload.get("id") != 1:
+                    continue
+                if "exceptionDetails" in payload:
+                    raise RuntimeError(
+                        f"Chrome JS failed: {payload['exceptionDetails']}"
+                    )
+                result = payload.get("result", {}).get("result", {})
+                value = result.get("value")
+                if value is None:
+                    return ""
+                if isinstance(value, str):
+                    return value
+                return json.dumps(value)
+        raise RuntimeError("Chrome JS did not return a response")
+
+    async def _cdp_page_ws_url(self, port: int, timeout_ms: int) -> str:
+        async with httpx.AsyncClient(timeout=timeout_ms / 1000) as client:
+            resp = await client.get(f"http://127.0.0.1:{port}/json")
+            resp.raise_for_status()
+            targets = resp.json()
+        for target in targets:
+            if target.get("type") == "page" and target.get("webSocketDebuggerUrl"):
+                return target["webSocketDebuggerUrl"]
+        raise RuntimeError("Chrome CDP page target not found")
 
     async def _osascript(self, script: str, timeout_ms: int) -> str:
         proc = await asyncio.create_subprocess_exec(
