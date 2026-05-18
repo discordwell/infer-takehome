@@ -22,6 +22,8 @@ DASHBOARD_URL_CANDIDATES = (
     "https://www.usaa.com/",
 )
 DOCS_URL_CANDIDATES = (
+    "https://www.usaa.com/my/auto-insurance/",
+    "https://www.usaa.com/my/auto-insurance",
     "https://www.usaa.com/inet/ent_edde/ViewMyDocuments",
     "https://www.usaa.com/inet/gas_pc_pas/GyMemberAutoHistoryServlet",
     (
@@ -45,12 +47,6 @@ MFA_CODE_INPUT_SELECTOR = (
     "input[inputmode='numeric']:visible, "
     "input[name*='code' i]:visible, "
     "input[id*='code' i]:visible"
-)
-
-USAA_USER_AGENT = (
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-    "AppleWebKit/537.36 (KHTML, like Gecko) "
-    "Chrome/130.0.0.0 Safari/537.36"
 )
 
 STEALTH_INIT_SCRIPT = """
@@ -106,7 +102,6 @@ class UsaaFlow(CarrierFlow):
             "_launch_chrome_cdp": True,
             "_chrome_profile_dir": str(USAA_CHROME_PROFILE_DIR),
             "_init_script": STEALTH_INIT_SCRIPT,
-            "user_agent": USAA_USER_AGENT,
             "viewport": {"width": 1280, "height": 800},
             "locale": "en-US",
             "timezone_id": "America/New_York",
@@ -267,6 +262,11 @@ class UsaaFlow(CarrierFlow):
     ) -> tuple[list[Document], dict[str, bytes]]:
         self.mark_timing("docs_fetch_start")
         await self._prepare_page(page)
+        docs, doc_bytes = await self._fetch_from_document_surface(page, http, ctx)
+        if docs:
+            self.mark_timing("docs_first_document_ready")
+            return docs, doc_bytes
+
         candidates: list[tuple[str, str]] = []
         for url in DOCS_URL_CANDIDATES:
             try:
@@ -303,10 +303,11 @@ class UsaaFlow(CarrierFlow):
             except Exception as e:
                 log.warning("usaa: docs URL %s failed: %s", url, e)
                 continue
-            docs, doc_bytes = await self._fetch_document_buttons(page, http, ctx)
+            docs, doc_bytes = await self._fetch_from_document_surface(page, http, ctx)
             if docs:
                 self.mark_timing("docs_first_document_ready")
                 return docs, doc_bytes
+
             candidates = await self._collect_document_links(page)
             if candidates:
                 break
@@ -358,6 +359,29 @@ class UsaaFlow(CarrierFlow):
             await self._dump_debug(page, "docs-fetch-failed")
             raise RuntimeError("USAA: found document links, but downloads failed")
         return docs, doc_bytes
+
+    async def _fetch_from_document_surface(
+        self,
+        page: Page,
+        http: httpx.AsyncClient,
+        ctx: BrowserContext,
+    ) -> tuple[list[Document], dict[str, bytes]]:
+        docs, doc_bytes = await self._fetch_document_buttons(page, http, ctx)
+        if docs:
+            return docs, doc_bytes
+
+        docs, doc_bytes = await self._fetch_named_document_actions(page, http, ctx)
+        if docs:
+            return docs, doc_bytes
+
+        if await self._open_policy_documents_from_summary(page):
+            self.mark_timing("policy_documents_opened")
+            docs, doc_bytes = await self._fetch_document_buttons(page, http, ctx)
+            if docs:
+                return docs, doc_bytes
+            return await self._fetch_named_document_actions(page, http, ctx)
+
+        return [], {}
 
     async def _fetch_document_buttons(
         self,
@@ -418,6 +442,92 @@ class UsaaFlow(CarrierFlow):
         except Exception as e:
             log.warning("usaa: first document button failed: %s", e)
         return [], {}
+
+    async def _fetch_named_document_actions(
+        self,
+        page: Page,
+        http: httpx.AsyncClient,
+        ctx: BrowserContext,
+    ) -> tuple[list[Document], dict[str, bytes]]:
+        action_patterns = (
+            re.compile(r"Proof of insurance", re.I),
+            re.compile(r"^(Auto )?ID card$", re.I),
+        )
+        for pattern in action_patterns:
+            button = page.get_by_role("button", name=pattern).first
+            if await button.count() == 0:
+                continue
+            try:
+                name = (await button.inner_text(timeout=1000)).strip()
+            except Exception:
+                name = pattern.pattern.strip("^$") or "USAA document 1"
+            try:
+                payload = await self._click_for_first_document(
+                    page, http, ctx, button, name
+                )
+                if payload is not None:
+                    body, content_type, display_name = payload
+                    return self._single_document(body, content_type, display_name)
+            except Exception as e:
+                log.warning("usaa: document action %s failed: %s", pattern.pattern, e)
+        return [], {}
+
+    async def _click_for_first_document(
+        self,
+        page: Page,
+        http: httpx.AsyncClient,
+        ctx: BrowserContext,
+        target: Locator,
+        name: str,
+    ) -> tuple[bytes, str, str] | None:
+        response_queue: asyncio.Queue = asyncio.Queue()
+        saw_response_headers = False
+
+        def on_response(resp):
+            nonlocal saw_response_headers
+            if self._looks_like_document_response(resp):
+                response_queue.put_nowait(resp)
+                if not saw_response_headers:
+                    self.mark_timing("doc_pdf_response_headers")
+                    saw_response_headers = True
+
+        page.on("response", on_response)
+        download_task = asyncio.create_task(page.wait_for_event("download", timeout=7000))
+        popup_task = asyncio.create_task(ctx.wait_for_event("page", timeout=7000))
+        try:
+            await target.click(timeout=5000)
+            self.mark_timing("doc_action_clicked")
+            return await self._first_document_payload(
+                page, http, response_queue, download_task, popup_task, name
+            )
+        finally:
+            page.remove_listener("response", on_response)
+            for task in (download_task, popup_task):
+                if not task.done():
+                    task.cancel()
+
+    async def _open_policy_documents_from_summary(self, page: Page) -> bool:
+        rows = page.locator("li", has_text=re.compile(r"Policy documents", re.I))
+        if await rows.count() == 0:
+            return False
+        row = rows.first
+        try:
+            button = row.get_by_role("button", name=re.compile(r"View", re.I)).first
+            await button.click(timeout=4000)
+            try:
+                await page.wait_for_load_state("domcontentloaded", timeout=5000)
+            except Exception:
+                pass
+            try:
+                await page.locator("button[data-testid^='readDocument-']").first.wait_for(
+                    state="visible", timeout=5000
+                )
+            except Exception:
+                await page.wait_for_timeout(700)
+            return True
+        except Exception as e:
+            log.warning("usaa: policy documents action failed: %s", e)
+            return False
 
     async def _first_document_payload(
         self,

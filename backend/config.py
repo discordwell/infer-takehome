@@ -7,6 +7,7 @@ class Settings(BaseSettings):
     playwright_headless: bool = True
     playwright_slowmo_ms: int = 0
     session_ttl_seconds: int = 1800
+    mfa_timeout_seconds: int = 300
     carrier_mock: bool = False
     mock_bad_password: bool = False
     mock_bad_mfa: bool = False

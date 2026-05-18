@@ -324,9 +324,26 @@ async def http_from_context(
             domain=c.get("domain", ""),
             path=c.get("path", "/"),
         )
+    if user_agent is None:
+        user_agent = await _navigator_user_agent(ctx)
     return httpx.AsyncClient(
         cookies=jar,
         headers={"User-Agent": user_agent or USER_AGENT},
         follow_redirects=True,
         timeout=15.0,
     )
+
+
+async def _navigator_user_agent(ctx: BrowserContext) -> str | None:
+    page = ctx.pages[0] if ctx.pages else None
+    owned_page = False
+    if page is None:
+        page = await ctx.new_page()
+        owned_page = True
+    try:
+        return await page.evaluate("navigator.userAgent")
+    except Exception:
+        return None
+    finally:
+        if owned_page and page is not None and not page.is_closed():
+            await page.close()

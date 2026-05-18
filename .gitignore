@@ -8,6 +8,7 @@ __pycache__/
 
 storage/sessions/
 storage/browser-profiles/
+storage/backups/
 storage/*.json
 !storage/sessions/.gitkeep
 

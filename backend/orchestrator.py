@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 
+from .config import settings
 from . import storage
 from .carriers.base import CarrierFlow
 from .carriers.registry import get_flow
@@ -129,7 +130,9 @@ async def _full_login(
     await flow.login(page, username, password)
 
     if await flow.mfa_required(page):
-        code = await manager.request_mfa(session_id)
+        code = await manager.request_mfa(
+            session_id, timeout=settings.mfa_timeout_seconds
+        )
         _reset_timing(flow)
         _mark_timing(flow, "mfa_code_received")
         await flow.submit_mfa(page, code)
