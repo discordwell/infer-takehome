@@ -430,6 +430,7 @@ class UsaaFlow(CarrierFlow):
         all_doc_bytes: dict[str, bytes] = {}
         seen: set[str] = set()
         for idx in range(count):
+            await self._close_document_viewer(page)
             button = buttons.nth(idx)
             try:
                 name = (
@@ -529,14 +530,69 @@ class UsaaFlow(CarrierFlow):
         try:
             await target.click(timeout=5000)
             self.mark_timing("doc_action_clicked")
-            return await self._first_document_payload(
+            payload = await self._first_document_payload(
                 page, http, response_queue, download_task, popup_task, name
             )
+            if payload is not None:
+                await self._close_document_viewer(page)
+            return payload
         finally:
             page.remove_listener("response", on_response)
             for task in (download_task, popup_task):
                 if not task.done():
                     task.cancel()
+
+    async def _close_document_viewer(self, page: Page) -> None:
+        modal = page.locator(
+            "[data-testid='document-view-modal'], "
+            "iframe[data-testid='document-view-iframe']"
+        )
+        try:
+            if await modal.count() == 0:
+                return
+        except Exception:
+            return
+
+        close_targets = (
+            page.locator(
+                "[data-testid='document-view-modal'] "
+                "button[aria-label*='close' i]"
+            ).first,
+            page.locator(
+                "[data-testid='document-view-modal'] "
+                "button[data-testid*='close' i]"
+            ).first,
+            page.locator(
+                "[data-testid='document-view-modal'] "
+                "[role='button'][aria-label*='close' i]"
+            ).first,
+            page.get_by_role(
+                "button", name=re.compile(r"close|dismiss|done", re.I)
+            ).first,
+        )
+        for target in close_targets:
+            try:
+                if await target.count() == 0:
+                    continue
+                await target.click(timeout=1200)
+                break
+            except Exception:
+                continue
+        else:
+            try:
+                await page.keyboard.press("Escape")
+            except Exception:
+                return
+
+        try:
+            await page.locator("[data-testid='document-view-modal']").first.wait_for(
+                state="hidden", timeout=2500
+            )
+        except Exception:
+            try:
+                await page.wait_for_timeout(300)
+            except Exception:
+                pass
 
     async def _open_policy_documents_from_summary(self, page: Page) -> bool:
         rows = page.locator("li", has_text=re.compile(r"Policy documents", re.I))
