@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import time
 
 from .config import settings
 from . import storage
@@ -28,6 +29,8 @@ async def execute_login(
     try:
         flow = get_flow(carrier)
         stored_state = storage.load(carrier.value, username)
+        if not _should_use_stored_state(carrier, username, stored_state):
+            stored_state = None
         context_options = flow.context_options()
 
         async with runner.new_context(
@@ -58,6 +61,33 @@ async def execute_login(
     except Exception as e:  # noqa: BLE001 — top of background task
         log.exception("login flow failed for session %s", session_id)
         manager.set_error(session_id, str(e) or e.__class__.__name__)
+
+
+def _should_use_stored_state(
+    carrier: Carrier,
+    username: str,
+    stored_state: dict | None,
+) -> bool:
+    if stored_state is None:
+        return False
+    if carrier != Carrier.USAA:
+        return True
+
+    saved_at = storage.saved_at(carrier.value, username)
+    if saved_at is None:
+        log.info("skipping USAA stored state: no saved_at timestamp")
+        return False
+
+    age_seconds = time.time() - saved_at
+    max_age = settings.usaa_quick_path_max_age_seconds
+    if age_seconds > max_age:
+        log.info(
+            "skipping USAA stored state: %.1fs old exceeds %.1fs freshness window",
+            age_seconds,
+            max_age,
+        )
+        return False
+    return True
 
 
 async def _try_quick_path(

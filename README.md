@@ -150,6 +150,11 @@ After a successful run we persist Playwright's `storage_state` to `storage/sessi
 3. If we land on the dashboard (not a login page), skip MFA entirely and go straight to fetching docs.
 4. If the carrier expired the session, fall through to fresh login.
 
+USAA is more conservative: the quick path is only attempted when the saved
+state is fresh, controlled by `USAA_QUICK_PATH_MAX_AGE_SECONDS` and defaulting
+to 300 seconds. Older USAA state goes straight to full login so a stale
+shortcut does not waste a hosted attempt.
+
 This is what makes "reliability and session reuse" measurable in the Loom — back-to-back runs visibly skip MFA on the second one.
 
 Latest USAA local check: stored state skipped MFA and returned one PDF in ~4.81s.
