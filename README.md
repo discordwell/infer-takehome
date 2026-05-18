@@ -10,7 +10,7 @@ Hosted demo: https://infer.discordwell.com
 
 - **Backend:** Python 3.11+ • FastAPI • Playwright (async) • httpx • Server-Sent Events
 - **Frontend:** vanilla HTML / CSS / JS (single file each, no build step)
-- **Active carriers:** USAA and Geico. Progressive / Allstate / State Farm appear in the dropdown but are stubbed.
+- **Active carriers:** USAA and Geico. Progressive / Allstate / State Farm have experimental generic adapters for credential-driven fallback validation.
 
 ## Quickstart
 
@@ -27,7 +27,9 @@ For live carrier flows, fill `.env` first:
 
 ```bash
 cp .env.example .env
-# set USAA_USERNAME / USAA_PASSWORD or GEICO_USERNAME / GEICO_PASSWORD
+# set credentials for the carrier you are testing, e.g.
+# USAA_USERNAME / USAA_PASSWORD, GEICO_USERNAME / GEICO_PASSWORD,
+# PROGRESSIVE_USERNAME / PROGRESSIVE_PASSWORD, etc.
 ```
 
 ## Run modes
@@ -56,10 +58,11 @@ MOCK_SKIP_MFA=1   CARRIER_MOCK=1 uv run uvicorn backend.main:app   # carrier-tru
 
 With real credentials in `.env`, run plain `uvicorn` (no `CARRIER_MOCK`). USAA defaults to `USAA_LOGIN_DRIVER=os_browser`: the local worker launches real Chrome with a dedicated profile, uses macOS AppleScript/System Events for the sensitive username/password step, then attaches over CDP after login reaches MFA or an authenticated page. Set `USAA_LOGIN_DRIVER=playwright` to force the older all-Playwright path for debugging. The first run does full login + email/phone MFA + doc fetch. The second run (same username) tries the stored `storage_state` quick path.
 
-### Hosted USAA worker mode
+### Hosted worker mode
 
-If USAA rejects the hosted server before MFA, keep the public app hosted and run
-the carrier automation on a trusted local machine:
+If a carrier rejects the hosted server before MFA or the hosted Chrome runtime is
+too brittle, keep the public app hosted and run carrier automation on a trusted
+local machine:
 
 ```bash
 # local/residential worker
@@ -72,12 +75,17 @@ ssh -N -R 127.0.0.1:8041:127.0.0.1:8040 ovh2
 Then set this on the hosted app:
 
 ```bash
-USAA_WORKER_BASE_URL=http://host.docker.internal:8041
+WORKER_BASE_URL=http://host.docker.internal:8041
+WORKER_PROXY_CARRIERS=usaa
 ```
 
-The frontend and public API do not change. The hosted app proxies USAA
-`/api/login`, `/api/status`, `/api/mfa`, and `/api/docs` calls to the local
-worker while other carriers still run normally on the hosted backend.
+`USAA_WORKER_BASE_URL` remains supported as a backwards-compatible alias for
+`WORKER_BASE_URL`. The frontend and public API do not change. The hosted app
+proxies selected carrier `/api/login`, `/api/status`, `/api/mfa`, and
+`/api/docs` calls to the local worker while other carriers still run normally
+on the hosted backend. Use `WORKER_PROXY_CARRIERS=all` or a comma list such as
+`usaa,geico,progressive` when the next live credential should also run through
+the local worker.
 
 For the default USAA OS-browser driver, the local macOS worker needs Chrome
 installed and Accessibility permission granted to the terminal/Codex app that
@@ -119,6 +127,7 @@ backend/
     base.py            # CarrierFlow ABC
     usaa.py            # USAA-specific Playwright flow
     geico.py           # Geico-specific Playwright flow
+    generic_portal.py  # experimental Progressive/State Farm/Allstate fallback
     mock.py            # MockFlow for testing without creds
     registry.py        # carrier → flow lookup
 frontend/

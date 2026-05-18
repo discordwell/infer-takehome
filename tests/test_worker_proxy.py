@@ -70,3 +70,23 @@ def test_terminal_sse_payload_detection():
     assert _terminal_sse_payload(error.model_dump_json())
     assert not _terminal_sse_payload(mfa.model_dump_json())
     assert not _terminal_sse_payload("ping")
+
+
+def test_worker_proxy_carrier_list(monkeypatch):
+    proxy = WorkerProxy()
+    monkeypatch.setattr(settings, "worker_base_url", "http://worker")
+    monkeypatch.setattr(settings, "usaa_worker_base_url", None)
+    monkeypatch.setattr(settings, "worker_proxy_carriers", "usaa,progressive")
+
+    assert proxy.enabled_for(Carrier.USAA)
+    assert proxy.enabled_for(Carrier.PROGRESSIVE)
+    assert not proxy.enabled_for(Carrier.GEICO)
+
+
+def test_worker_proxy_all_carriers(monkeypatch):
+    proxy = WorkerProxy()
+    monkeypatch.setattr(settings, "worker_base_url", "http://worker")
+    monkeypatch.setattr(settings, "usaa_worker_base_url", None)
+    monkeypatch.setattr(settings, "worker_proxy_carriers", "all")
+
+    assert all(proxy.enabled_for(carrier) for carrier in Carrier)

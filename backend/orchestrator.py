@@ -29,7 +29,7 @@ async def execute_login(
             if stored_state is not None:
                 _discard_stale_carrier_state(flow, username)
             stored_state = None
-        context_options = flow.context_options()
+        context_options = _context_options_for_username(flow, username)
 
         if stored_state is not None:
             async with runner.new_context(
@@ -132,6 +132,13 @@ def _discard_stale_carrier_state(flow: CarrierFlow, username: str) -> None:
     discard = getattr(flow, "discard_stale_state", None)
     if callable(discard):
         discard(username)
+
+
+def _context_options_for_username(flow: CarrierFlow, username: str) -> dict:
+    scoped_options = getattr(flow, "context_options_for_username", None)
+    if callable(scoped_options):
+        return scoped_options(username)
+    return flow.context_options()
 
 
 async def _try_quick_path(

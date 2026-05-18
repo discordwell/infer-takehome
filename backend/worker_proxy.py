@@ -25,7 +25,7 @@ class WorkerProxy:
         self._sessions: dict[str, WorkerSession] = {}
 
     def enabled_for(self, carrier: Carrier) -> bool:
-        return carrier == Carrier.USAA and bool(settings.usaa_worker_base_url)
+        return bool(_worker_base_url()) and carrier in _worker_proxy_carriers()
 
     def has_session(self, session_id: str) -> bool:
         self._prune_stale()
@@ -113,9 +113,10 @@ class WorkerProxy:
         return session
 
     def _client(self, timeout) -> httpx.AsyncClient:
-        assert settings.usaa_worker_base_url is not None
+        base_url = _worker_base_url()
+        assert base_url is not None
         return httpx.AsyncClient(
-            base_url=settings.usaa_worker_base_url.rstrip("/"),
+            base_url=base_url.rstrip("/"),
             timeout=timeout,
             follow_redirects=False,
         )
@@ -160,6 +161,27 @@ def _error_event(message: str) -> dict[str, str]:
         error=message,
     )
     return {"event": "error", "data": payload.model_dump_json()}
+
+
+def _worker_base_url() -> str | None:
+    return settings.worker_base_url or settings.usaa_worker_base_url
+
+
+def _worker_proxy_carriers() -> set[Carrier]:
+    raw = settings.worker_proxy_carriers.strip().lower()
+    if raw in {"*", "all"}:
+        return set(Carrier)
+
+    carriers: set[Carrier] = set()
+    for part in raw.split(","):
+        value = part.strip()
+        if not value:
+            continue
+        try:
+            carriers.add(Carrier(value))
+        except ValueError:
+            continue
+    return carriers
 
 
 worker_proxy = WorkerProxy()

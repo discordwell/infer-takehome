@@ -135,9 +135,16 @@ class UsaaFlow(CarrierFlow):
             },
         }
 
+    def context_options_for_username(self, username: str) -> dict:
+        options = self.context_options()
+        options["_chrome_profile_dir"] = str(
+            self._chrome_profile_dir_for_username(username)
+        )
+        return options
+
     def discard_stale_state(self, username: str) -> None:
         """Move the persistent Chrome profile aside before a fresh USAA login."""
-        profile_dir = self._chrome_profile_dir()
+        profile_dir = self._chrome_profile_dir_for_username(username)
         if not profile_dir.exists():
             return
 
@@ -171,7 +178,10 @@ class UsaaFlow(CarrierFlow):
 
         options = dict(context_options)
         options.pop("_launch_chrome_cdp", None)
-        profile_dir = options.pop("_chrome_profile_dir", str(self._chrome_profile_dir()))
+        profile_dir = options.pop(
+            "_chrome_profile_dir",
+            str(self._chrome_profile_dir_for_username(username)),
+        )
         options["_initial_url"] = LOGIN_URL
 
         async def before_connect(port: int, launched_profile_dir: Path) -> None:
@@ -205,6 +215,18 @@ class UsaaFlow(CarrierFlow):
                 return configured
             return PROJECT_ROOT / configured
         return USAA_CHROME_PROFILE_DIR
+
+    def _chrome_profile_dir_for_username(self, username: str) -> Path:
+        base = self._chrome_profile_dir()
+        if self._login_driver() != "os_browser":
+            return base
+        return base / self._profile_user_key(username)
+
+    @staticmethod
+    def _profile_user_key(username: str) -> str:
+        normalized = username.strip().lower() or "default"
+        digest = hashlib.sha256(normalized.encode()).hexdigest()[:16]
+        return f"user-{digest}"
 
     async def _os_browser_login(
         self, username: str, password: str, profile_dir: Path, port: int

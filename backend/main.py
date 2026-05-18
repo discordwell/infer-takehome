@@ -115,6 +115,21 @@ async def dev_credentials(request: Request) -> dict:
             "username": settings.geico_username,
             "password": settings.geico_password,
         }
+    if settings.progressive_username and settings.progressive_password:
+        creds[Carrier.PROGRESSIVE.value] = {
+            "username": settings.progressive_username,
+            "password": settings.progressive_password,
+        }
+    if settings.allstate_username and settings.allstate_password:
+        creds[Carrier.ALLSTATE.value] = {
+            "username": settings.allstate_username,
+            "password": settings.allstate_password,
+        }
+    if settings.state_farm_username and settings.state_farm_password:
+        creds[Carrier.STATE_FARM.value] = {
+            "username": settings.state_farm_username,
+            "password": settings.state_farm_password,
+        }
     return {"credentials": creds}
 
 

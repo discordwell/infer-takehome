@@ -57,6 +57,29 @@ def test_discard_stale_carrier_state_uses_optional_hook():
     assert calls == ["u"]
 
 
+def test_context_options_for_username_uses_optional_hook():
+    class Flow:
+        def context_options_for_username(self, username):
+            return {"profile": username}
+
+        def context_options(self):
+            return {"profile": "base"}
+
+    assert orchestrator._context_options_for_username(Flow(), "alice") == {
+        "profile": "alice"
+    }
+
+
+def test_context_options_for_username_falls_back_to_base_options():
+    class Flow:
+        def context_options(self):
+            return {"profile": "base"}
+
+    assert orchestrator._context_options_for_username(Flow(), "alice") == {
+        "profile": "base"
+    }
+
+
 async def test_login_context_mfa_flow_completes(monkeypatch):
     flow = _LoginContextFlow(mfa_required=True)
     monkeypatch.setattr(orchestrator, "get_flow", lambda carrier: flow)

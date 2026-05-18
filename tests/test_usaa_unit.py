@@ -89,6 +89,22 @@ def test_usaa_context_options_default_to_os_browser_profile(tmp_path, monkeypatc
     assert options["_chrome_profile_dir"] == str(profile)
 
 
+def test_usaa_context_options_for_username_scopes_os_browser_profile(
+    tmp_path, monkeypatch
+):
+    profile = tmp_path / "os-profile"
+    monkeypatch.setattr(settings, "usaa_login_driver", "os_browser")
+    monkeypatch.setattr(settings, "usaa_os_browser_profile_dir", str(profile))
+
+    first = UsaaFlow().context_options_for_username("alice@example.com")
+    second = UsaaFlow().context_options_for_username("bob@example.com")
+
+    assert first["_chrome_profile_dir"].startswith(str(profile))
+    assert second["_chrome_profile_dir"].startswith(str(profile))
+    assert first["_chrome_profile_dir"] != second["_chrome_profile_dir"]
+    assert "alice" not in first["_chrome_profile_dir"]
+
+
 def test_usaa_context_options_can_use_playwright_profile(tmp_path, monkeypatch):
     profile = tmp_path / "usaa-cdp"
     monkeypatch.setattr(settings, "usaa_login_driver", "playwright")
