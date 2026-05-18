@@ -597,7 +597,12 @@ class UsaaFlow(CarrierFlow):
     async def _open_policy_documents_from_summary(self, page: Page) -> bool:
         rows = page.locator("li", has_text=re.compile(r"Policy documents", re.I))
         if await rows.count() == 0:
-            return False
+            if not self._is_auto_policy_surface(page):
+                return False
+            try:
+                await rows.first.wait_for(state="visible", timeout=4500)
+            except Exception:
+                return False
         row = rows.first
         try:
             button = row.get_by_role("button", name=re.compile(r"View", re.I)).first
@@ -616,6 +621,11 @@ class UsaaFlow(CarrierFlow):
         except Exception as e:
             log.warning("usaa: policy documents action failed: %s", e)
             return False
+
+    @staticmethod
+    def _is_auto_policy_surface(page: Page) -> bool:
+        url = page.url.lower()
+        return "auto-insurance" in url or "insurance_auto" in url
 
     async def _first_document_payload(
         self,
