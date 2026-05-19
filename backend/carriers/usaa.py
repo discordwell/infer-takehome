@@ -1030,7 +1030,7 @@ class UsaaFlow(CarrierFlow):
         deadline = time.perf_counter() + 6.0
         while time.perf_counter() < deadline:
             try:
-                read_buttons = page.locator("button[data-testid^='viewDocument-']")
+                read_buttons = page.locator("button[data-testid^='readDocument-']")
                 if await read_buttons.count() > 0:
                     return True
             except Exception:
@@ -1053,7 +1053,7 @@ class UsaaFlow(CarrierFlow):
     async def _wait_for_document_center_ready(self, page: Page) -> bool:
         ready = page.locator(
             "input[data-testid='search-text']:visible, "
-            "button[data-testid^='viewDocument-']:visible"
+            "button[data-testid^='readDocument-']:visible"
         )
         try:
             await ready.first.wait_for(state="visible", timeout=7000)
@@ -1112,7 +1112,7 @@ class UsaaFlow(CarrierFlow):
             try:
                 if (
                     await page.locator(
-                        "button[data-testid^='viewDocument-']:visible"
+                        "button[data-testid^='readDocument-']:visible"
                     ).count()
                     > 0
                 ):
@@ -1305,7 +1305,7 @@ class UsaaFlow(CarrierFlow):
     ) -> list[UsaaDocumentButtonCandidate]:
         try:
             raw_candidates = await page.eval_on_selector_all(
-                "button[data-testid^='viewDocument-']",
+                "button[data-testid^='readDocument-']",
                 """buttons => {
                     const normalize = value =>
                         (value || '').replace(/\\s+/g, ' ').trim();
@@ -1492,7 +1492,7 @@ class UsaaFlow(CarrierFlow):
         fallback_all: bool = True,
         emit_progress: bool = True,
     ) -> tuple[list[Document], dict[str, bytes]]:
-        buttons = page.locator("button[data-testid^='viewDocument-']")
+        buttons = page.locator("button[data-testid^='readDocument-']")
         count = await buttons.count()
         if count == 0:
             try:
@@ -1744,7 +1744,7 @@ class UsaaFlow(CarrierFlow):
             except Exception:
                 pass
             try:
-                await page.locator("button[data-testid^='viewDocument-']").first.wait_for(
+                await page.locator("button[data-testid^='readDocument-']").first.wait_for(
                     state="visible", timeout=5000
                 )
             except Exception:
