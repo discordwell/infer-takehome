@@ -2,6 +2,105 @@
 
 ## Session Summaries
 
+### 2026-05-19 06:45Z — Auto-repair pickup mechanism + verifier Chrome-CDP fix
+
+Closed the "DONE-but-never-landed" gap that prior session
+`f9dbc579...` flagged: the verifier was accepting `STATUS: DONE` and
+then the in-container fix vanished on the next `deploy.sh` (which
+rsyncs the whole tree, overwriting claude's edits to `/app`). Now
+verified patches land in two complementary places.
+
+- **New module** `backend/auto_repair_patches.py`:
+  - `record()` — saves `git diff HEAD` to
+    `storage/patches/<ts>__<carrier>__<sid>.patch` on the
+    `infer-storage` named volume.
+  - `apply_pending()` — at container boot, walks the dir and runs
+    `git apply --check` then `git apply` for each. Clean apply →
+    stays put (re-applies every restart). Context-not-present (i.e.
+    deploy carried the upstream merge) → renamed `.LANDED`. Real
+    conflict / error → renamed `.SKIPPED`. CLI entry
+    `python -m backend.auto_repair_patches apply`.
+  - `push_to_branch()` — side-clones via `tempfile.mkdtemp`, applies
+    diff with `--3way`, commits as `auto-repair bot
+    <auto-repair@infer.local>`, force-pushes to
+    `auto-repair/<session_id>`. PAT loaded from
+    `storage/secrets/github_pat`.
+
+- **Dockerfile CMD** wraps in `sh -c` so `apply_pending` runs BEFORE
+  `uvicorn` imports the carrier modules (otherwise the patched code
+  wouldn't be live in-process). `|| true` so a broken patch can't
+  block boot; `exec` so SIGTERM propagates.
+
+- **`auto_repair.py`** gets `_persist_and_push_patch()` called from
+  `_check_done` immediately after `_verify_fix` passes. Best-effort
+  — any failure here doesn't undo the verifier accept.
+
+- **Verifier fix** in `_verify_fix`: reads `username` from
+  `context.json`, calls `flow.context_options_for_username()` (or
+  bare `context_options()` if no username), drops `_initial_url`,
+  routes to a dedicated `storage/browser-profiles/verify/<carrier>-
+  <sid>` profile dir, and passes through to
+  `pw_runner.new_context(storage_state=..., **opts)`. This switches
+  the verify browser from plain headless Playwright to the carrier's
+  Chrome-CDP stealth context — the previous session 71a7e651's USAA
+  reject was caused by Akamai blocking the plain headless shape with
+  `ERR_HTTP2_PROTOCOL_ERROR`, NOT by claude's fix being wrong.
+
+- **`repair_prompt.md`** gets a new "What happens after STATUS: DONE"
+  section so the in-container claude understands its DONE will be
+  (a) verified, (b) persisted to the named volume, (c) pushed to a
+  GitHub branch. Encourages keeping the working-tree diff clean.
+
+- **GitHub auth**: fine-grained PAT, scope = contents:write on
+  `discordwell/infer-takehome` only. Stored at
+  `storage/secrets/github_pat` (root:root, 600) inside the container
+  via `docker cp` after chown, and also at `INFER_AUTOREPAIR_GH_PAT=...`
+  in local `.env` (gitignored). PAT never embedded in git config —
+  `push_to_branch` reads it per-call and builds the auth URL inline.
+
+- **Wet-tested**: synthetic patch → recorded → applied on restart →
+  pushed to a throwaway `auto-repair/wet-test-push-*` branch on GitHub
+  with the right commit author/message/diff. Branch + check branch +
+  /tmp staging + container patch all cleaned up afterward.
+
+- **E2E result** (session `32d0546c...`, turn 1 → NEED_HUMAN at
+  06:48Z): the pickup mechanism was NOT exercised because claude
+  correctly identified an upstream blocker — the saved
+  `auth_state.json` for cordwell has all the right USAA cookie names
+  (UsaaMbWebMemberLoggedIn, MemberGlobalSession, JSESSIONID,
+  socureSessionCookie, akusaa, rlas3, khaos) but USAA invalidated
+  the server-side session. Every `/my/documents`,
+  `/my/auto-insurance/`, and `/inet/wc/document_center` URL either
+  302s to `/my/logon` or returns "Page Not Found". The deliberate
+  selector break therefore never gets exercised — there are no
+  document buttons (real or broken) to find. Claude ran 3 CDP
+  probes against the live repair browser to confirm. Wrote a clean
+  NEED_HUMAN with three follow-ups: (a) wire WORKER_PROXY_CARRIERS
+  through to a real macOS worker, (b) refresh cookies via user
+  re-login, (c) distinct "session expired" SessionState. **No
+  spurious GitHub push happened** — correct behavior, the new
+  `_persist_and_push_patch` only fires after `_verify_fix` passes,
+  not on NEED_HUMAN.
+
+- **Wet test fully exercised the new path** (synthetic patch on
+  `backend/__init__.py`): record → apply on restart → push → branch
+  on GitHub at commit `e4366e0a`. Branch + check-branch + container
+  patch + reverted file all cleaned up.
+
+- **Verifier fix is in place** but couldn't be demonstrated because
+  the upstream cookie issue means `fetch_documents` would return 0
+  docs regardless of selector validity. To actually see verifier-
+  pass → GitHub-push happen, we need fresh USAA cookies (user re-
+  login through a working flow).
+
+- **Prod state after this batch**: image rebuilt twice (pickup
+  infrastructure deploy, then revert-deliberate-break deploy).
+  Working tree clean. Verifier upgraded to Chrome-CDP context.
+  `auto-repair/wet-test-push-*` branch cleaned from GitHub.
+
+- Commits: `321182d` (pickup mechanism), `5b3c97d` (verifier fix).
+  Both pushed to main; no auto-repair branches currently on origin.
+
 ### 2026-05-19 — Feedback recovery, live Claude doc delivery, email-on-done
 
 Three new subsystems on top of multi-session + live-Claude-UI:
