@@ -206,9 +206,15 @@ async def push_to_branch(
 
         patch_in_clone = clone_dir / "__auto_repair_patch.diff"
         patch_in_clone.write_text(patch_content)
+        # Plain `git apply` (not --3way). The container's /app git baseline
+        # is a synthetic init-time commit local to the image; GitHub doesn't
+        # have those blobs, so a 3-way merge always fails with "repository
+        # lacks the necessary blob to perform 3-way merge". The patch
+        # context is generated against the image's working tree, which
+        # matches main HEAD at deploy time — so plain apply succeeds as
+        # long as main hasn't diverged since.
         r = await _run(
-            ["git", "apply", "--3way", "--whitespace=nowarn",
-             str(patch_in_clone)],
+            ["git", "apply", "--whitespace=nowarn", str(patch_in_clone)],
             cwd=clone_dir,
         )
         try:
@@ -216,7 +222,7 @@ async def push_to_branch(
         except OSError:
             pass
         if r.returncode != 0:
-            return False, f"git apply --3way failed: {r.stderr_str[:300]}"
+            return False, f"git apply failed: {r.stderr_str[:300]}"
 
         r = await _run(["git", "add", "-A"], cwd=clone_dir)
         if r.returncode != 0:
