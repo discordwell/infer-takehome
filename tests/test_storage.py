@@ -7,7 +7,8 @@ from backend import storage
 
 @pytest.fixture(autouse=True)
 def tmp_storage_dir(tmp_path: Path, monkeypatch):
-    monkeypatch.setattr(storage, "STORAGE_DIR", tmp_path)
+    monkeypatch.setattr(storage, "STORAGE_DIR", tmp_path / "sessions")
+    monkeypatch.setattr(storage, "PARTIAL_AUTH_DIR", tmp_path / "partial-auth")
     yield
 
 
@@ -48,7 +49,7 @@ def test_delete_missing_is_noop():
 def test_corrupt_file_returns_none(tmp_path):
     storage.save("geico", "u", {"cookies": []})
     # corrupt the file
-    f = next(tmp_path.iterdir())
+    f = next((tmp_path / "sessions").iterdir())
     f.write_text("not json")
     assert storage.load("geico", "u") is None
 
@@ -66,3 +67,21 @@ def test_saved_at_returns_timestamp():
 
 def test_saved_at_missing_returns_none():
     assert storage.saved_at("geico", "nobody") is None
+
+
+def test_save_partial_auth_is_separate_from_reusable_auth_state():
+    state = {"cookies": [{"name": "mfa", "value": "pending"}], "origins": []}
+
+    path = storage.save_partial_auth(
+        carrier="progressive",
+        username="friend@example.com",
+        session_id="session-1",
+        storage_state=state,
+        url="https://account.apps.progressive.com/access/multi-step-authentication",
+    )
+
+    assert path.exists()
+    payload = path.read_text()
+    assert "friend@example.com" not in payload
+    assert '"reusable": false' in payload
+    assert storage.load("progressive", "friend@example.com") is None

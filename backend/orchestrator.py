@@ -246,6 +246,7 @@ async def _finish_after_login(
     context_options: dict,
 ) -> None:
     if await flow.mfa_required(page):
+        await _save_partial_auth_state(ctx, page, carrier, username, session_id)
         code = await manager.request_mfa(
             session_id, timeout=settings.mfa_timeout_seconds
         )
@@ -292,6 +293,31 @@ async def _save_auth_state(ctx, carrier: Carrier, username: str) -> None:
         )
     except Exception as e:  # noqa: BLE001
         log.warning("failed to save %s browser auth state: %s", carrier.value, e)
+
+
+async def _save_partial_auth_state(
+    ctx,
+    page,
+    carrier: Carrier,
+    username: str,
+    session_id: str,
+) -> None:
+    try:
+        path = storage.save_partial_auth(
+            carrier=carrier.value,
+            username=username,
+            session_id=session_id,
+            storage_state=await ctx.storage_state(),
+            url=getattr(page, "url", None),
+        )
+        log.info(
+            "saved non-reusable %s partial auth state for session %s -> %s",
+            carrier.value,
+            session_id,
+            path,
+        )
+    except Exception as e:  # noqa: BLE001
+        log.warning("failed to save %s partial auth state: %s", carrier.value, e)
 
 
 async def _fetch_documents_with_progress(

@@ -104,9 +104,15 @@ def test_context_options_for_username_falls_back_to_base_options():
 
 async def test_login_context_mfa_flow_completes(monkeypatch):
     flow = _LoginContextFlow(mfa_required=True)
+    partial_auth = []
     monkeypatch.setattr(orchestrator, "get_flow", lambda carrier: flow)
     monkeypatch.setattr(orchestrator.storage, "load", lambda carrier, username: None)
     monkeypatch.setattr(orchestrator.storage, "save", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        orchestrator.storage,
+        "save_partial_auth",
+        lambda **kwargs: partial_auth.append(kwargs) or "/tmp/partial.json",
+    )
     manager = SessionManager()
     session = manager.create(Carrier.USAA, "u")
 
@@ -121,6 +127,15 @@ async def test_login_context_mfa_flow_completes(monkeypatch):
     assert final.state == SessionState.DONE
     assert flow.submitted_code == "123456"
     assert final.docs[0].id == "doc-0"
+    assert partial_auth == [
+        {
+            "carrier": "usaa",
+            "username": "u",
+            "session_id": session.id,
+            "storage_state": {"cookies": [], "origins": []},
+            "url": "https://carrier.example/mfa",
+        }
+    ]
 
 
 async def test_login_context_no_mfa_fetches_docs(monkeypatch):
@@ -181,7 +196,7 @@ class _FakeContext:
 
 
 class _FakePage:
-    pass
+    url = "https://carrier.example/mfa"
 
 
 class _LoginContextFlow:

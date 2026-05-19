@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 STORAGE_DIR = Path(__file__).resolve().parent.parent / "storage" / "sessions"
+PARTIAL_AUTH_DIR = Path(__file__).resolve().parent.parent / "storage" / "partial-auth"
 
 
 def _key(carrier: str, username: str) -> str:
@@ -51,3 +52,32 @@ def saved_at(carrier: str, username: str) -> float | None:
 
 def delete(carrier: str, username: str) -> None:
     _path(carrier, username).unlink(missing_ok=True)
+
+
+def save_partial_auth(
+    *,
+    carrier: str,
+    username: str,
+    session_id: str,
+    storage_state: dict[str, Any],
+    url: str | None = None,
+    reason: str = "mfa_required",
+) -> Path:
+    PARTIAL_AUTH_DIR.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "saved_at": time.time(),
+        "carrier": carrier,
+        "session_id": session_id,
+        "username_hash": user_hash(username),
+        "reason": reason,
+        "url": url,
+        "reusable": False,
+        "storage_state": storage_state,
+    }
+    path = PARTIAL_AUTH_DIR / f"{_safe_id(session_id)}.json"
+    path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    return path
+
+
+def _safe_id(value: str) -> str:
+    return "".join(c if c.isalnum() or c in "._-" else "-" for c in value)[:120] or "id"

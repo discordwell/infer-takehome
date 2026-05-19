@@ -13,6 +13,7 @@ storage/backups/
 storage/debug/
 storage/logs/
 storage/results/
+storage/partial-auth/
 storage/*.json
 !storage/sessions/.gitkeep
 

@@ -243,6 +243,8 @@ After the app crosses login/MFA, Playwright storage state is saved under `storag
 
 If the carrier prompts for MFA and the user never completes it, the app does not promote that browser state to a reusable login. The user will need to start a new login later; no password is retained.
 
+For debugging only, the app also writes non-reusable partial auth snapshots to `storage/partial-auth/` when a login reaches MFA. These files can help inspect pre-MFA cookies and URLs, but no production code loads them for session reuse and they are not exposed through the UI/API.
+
 By default, non-USAA saved auth state is tried for 30 days (`AUTH_STATE_MAX_AGE_SECONDS=2592000`). USAA uses a shorter 30-minute freshness window (`USAA_QUICK_PATH_MAX_AGE_SECONDS=1800`) because stale USAA sessions waste live attempts. Set either value to `0` to disable that app-side freshness check. Carrier cookies can still expire earlier if the carrier invalidates them.
 
 Active UI sessions default to 24 hours via `SESSION_TTL_SECONDS=86400`. Completed document results are also persisted to `storage/results/`, so existing `/api/status/{session_id}` and `/api/docs/{session_id}/{doc_id}` links can survive a container restart until that TTL expires.
