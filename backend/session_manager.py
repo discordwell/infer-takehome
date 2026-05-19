@@ -6,6 +6,7 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Awaitable, Callable
 
+from .config import settings
 from .models import Carrier, Document, SessionState, StatusEvent
 
 
@@ -190,4 +191,4 @@ class SessionManager:
                 session.task.cancel()
 
 
-manager = SessionManager()
+manager = SessionManager(ttl_seconds=settings.session_ttl_seconds)

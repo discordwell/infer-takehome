@@ -82,9 +82,12 @@ Useful environment toggles:
 - `CARRIER_MOCK=1`: no live carrier login; deterministic mock docs.
 - `DEV_PREFILL_CREDS=1`: prefill credentials from `.env` in the local UI.
 - `WORKER_PROXY_CARRIERS=usaa`: only USAA proxies to a worker; other carriers run in this process.
+- `SESSION_TTL_SECONDS=86400`: keep active UI sessions and fetched document bytes for 24 hours.
+- `AUTH_STATE_MAX_AGE_SECONDS=2592000`: try saved browser auth state for up to 30 days.
 - `USAA_QUICK_PATH_MAX_AGE_SECONDS=0`: force a fresh USAA login instead of stored-session reuse.
 - `USAA_LOGIN_DRIVER=os_browser`: use real local Chrome for USAA credential submission.
 - `USAA_OS_BROWSER_PROFILE_DIR=storage/browser-profiles/<name>`: choose the Chrome profile used by the USAA OS-browser path.
+- `LOG_FILE_PATH=storage/logs/app.log`: write persistent rotating app logs.
 
 ## Run Locally
 
@@ -236,7 +239,20 @@ scripts/
 
 After a successful live run, Playwright storage state is saved under `storage/sessions/` using a hash of `(carrier, username)`. Later runs for the same carrier and username try that state first. If the carrier still trusts the session, the app skips MFA and goes straight to documents; otherwise it falls back to a full login.
 
-USAA uses a short freshness window for stored state because stale USAA sessions waste live attempts. Other carriers can reuse stored state normally.
+By default, non-USAA saved auth state is tried for 30 days (`AUTH_STATE_MAX_AGE_SECONDS=2592000`). USAA uses a shorter 30-minute freshness window (`USAA_QUICK_PATH_MAX_AGE_SECONDS=1800`) because stale USAA sessions waste live attempts. Set either value to `0` to disable that app-side freshness check. Carrier cookies can still expire earlier if the carrier invalidates them.
+
+Active UI sessions, including fetched document bytes served through `/api/docs/{session_id}/{doc_id}`, default to 24 hours via `SESSION_TTL_SECONDS=86400`.
+
+## Persistent Logs
+
+The app writes rotating logs to `storage/logs/app.log` by default. In Docker production, `/app/storage` is a named volume, so logs, debug artifacts, browser profiles, and saved auth state survive container rebuilds and redeploys.
+
+Useful hosted checks:
+
+```bash
+ssh ovh2 'cd /opt/infer-takehome && docker compose -f docker-compose.prod.yml logs --tail=200 infer'
+ssh ovh2 'docker run --rm -v infer-takehome_infer-storage:/storage busybox tail -n 200 /storage/logs/app.log'
+```
 
 ## Notes And Limitations
 

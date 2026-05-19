@@ -11,12 +11,14 @@ from fastapi.staticfiles import StaticFiles
 from sse_starlette.sse import EventSourceResponse
 
 from .config import settings
+from .logging_config import configure_logging
 from .models import Carrier, LoginRequest, LoginResponse, MfaRequest, SessionState
 from .orchestrator import execute_login
 from .playwright_runner import runner
 from .session_manager import SessionNotFoundError, manager
 from .worker_proxy import worker_proxy
 
+configure_logging()
 log = logging.getLogger(__name__)
 
 FRONTEND_DIR = Path(__file__).resolve().parent.parent / "frontend"

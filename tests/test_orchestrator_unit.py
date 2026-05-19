@@ -11,9 +11,31 @@ def test_should_use_stored_state_requires_state():
     assert not orchestrator._should_use_stored_state(Carrier.USAA, "u", None)
 
 
-def test_should_use_stored_state_keeps_non_usaa_reuse():
+def test_should_use_stored_state_keeps_non_usaa_reuse(monkeypatch):
+    monkeypatch.setattr(orchestrator.storage, "saved_at", lambda carrier, username: 1000.0)
+    monkeypatch.setattr(orchestrator.time, "time", lambda: 1001.0)
+
     assert orchestrator._should_use_stored_state(
         Carrier.GEICO, "u", {"cookies": [], "origins": []}
+    )
+
+
+def test_should_use_stored_state_rejects_stale_non_usaa(monkeypatch):
+    monkeypatch.setattr(settings, "auth_state_max_age_seconds", 300)
+    monkeypatch.setattr(orchestrator.storage, "saved_at", lambda carrier, username: 1000.0)
+    monkeypatch.setattr(orchestrator.time, "time", lambda: 1301.0)
+
+    assert not orchestrator._should_use_stored_state(
+        Carrier.PROGRESSIVE, "u", {"cookies": [], "origins": []}
+    )
+
+
+def test_should_use_stored_state_can_allow_indefinite_non_usaa(monkeypatch):
+    monkeypatch.setattr(settings, "auth_state_max_age_seconds", 0)
+    monkeypatch.setattr(orchestrator.storage, "saved_at", lambda carrier, username: None)
+
+    assert orchestrator._should_use_stored_state(
+        Carrier.PROGRESSIVE, "u", {"cookies": [], "origins": []}
     )
 
 

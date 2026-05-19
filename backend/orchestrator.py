@@ -108,19 +108,25 @@ def _should_use_stored_state(
 ) -> bool:
     if stored_state is None:
         return False
-    if carrier != Carrier.USAA:
+
+    max_age = (
+        settings.usaa_quick_path_max_age_seconds
+        if carrier == Carrier.USAA
+        else settings.auth_state_max_age_seconds
+    )
+    if max_age <= 0:
         return True
 
     saved_at = storage.saved_at(carrier.value, username)
     if saved_at is None:
-        log.info("skipping USAA stored state: no saved_at timestamp")
+        log.info("skipping %s stored state: no saved_at timestamp", carrier.value)
         return False
 
     age_seconds = time.time() - saved_at
-    max_age = settings.usaa_quick_path_max_age_seconds
     if age_seconds > max_age:
         log.info(
-            "skipping USAA stored state: %.1fs old exceeds %.1fs freshness window",
+            "skipping %s stored state: %.1fs old exceeds %.1fs freshness window",
+            carrier.value,
             age_seconds,
             max_age,
         )

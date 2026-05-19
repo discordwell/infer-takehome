@@ -6,12 +6,17 @@ class Settings(BaseSettings):
 
     playwright_headless: bool = True
     playwright_slowmo_ms: int = 0
-    session_ttl_seconds: int = 1800
+    session_ttl_seconds: int = 86400
     mfa_timeout_seconds: int = 300
-    usaa_quick_path_max_age_seconds: int = 300
+    auth_state_max_age_seconds: int = 2592000
+    usaa_quick_path_max_age_seconds: int = 1800
     usaa_login_driver: str = "os_browser"
     usaa_os_browser_profile_dir: str = "storage/browser-profiles/usaa-os-browser"
     usaa_os_login_timeout_seconds: int = 90
+    log_level: str = "INFO"
+    log_file_path: str = "storage/logs/app.log"
+    log_max_bytes: int = 10485760
+    log_backup_count: int = 5
     worker_base_url: str | None = None
     worker_proxy_carriers: str = "usaa"
     carrier_mock: bool = False
