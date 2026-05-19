@@ -23,7 +23,7 @@ services:
       USAA_WORKER_BASE_URL: "${USAA_WORKER_BASE_URL:-}"
       DEV_PREFILL_CREDS: "false"
       CHROME_BINARY: "/usr/bin/google-chrome-stable"
-      ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY:-}"
+      REPAIR_ENABLED: "${REPAIR_ENABLED:-true}"
     volumes:
       - infer-storage:/app/storage
       - infer-claude-home:/root/.claude

@@ -93,6 +93,49 @@ Decision matrix (auto-insurance customer portals, US):
 - **Allstate:** Acceptable, less common.
 - **State Farm:** Less attractive for this take-home because it often leans authenticator-app.
 
+## Self-healing auto-repair loop
+
+When the orchestrator hits `ERROR`, `backend/auto_repair.capture_and_kick`
+writes a small failure context to `storage/repair/<session_id>/` and spawns
+`claude` as a subprocess inside the container. Claude reads
+`backend/repair_prompt.md`, inspects the failing carrier with
+`scripts/repair_probe.py`, optionally edits `backend/carriers/<carrier>.py`,
+runs mock-mode tests, and writes a `STATUS` file (`DONE` or `NEED_HUMAN`).
+
+If the first turn doesn't terminate, a 5-minute cadence loop registered in
+`main.py` lifespan resumes the same claude session via `--resume` until
+either:
+- the STATUS file lands, or
+- the 30-minute wall timer elapses (controller writes `NEED_HUMAN`), or
+- `REPAIR_ENABLED=false` is set (kill switch).
+
+Per-carrier dedup: at most one claude per carrier at a time — additional
+failures for the same carrier fold in rather than spawning new subprocesses.
+
+Auth: claude inside the container uses the OAuth token at
+`/root/.claude/.credentials.json` (persisted on the `infer-claude-home`
+named volume across rebuilds). No API key is in use.
+
+```
+orchestrator ERROR ──► capture_and_kick ──► claude -p (subprocess)
+                       writes context.json     │
+                       copies auth_state.json   ▼
+                                            reads prompt
+                                            probes site (logged-in via
+                                              storage_state)
+                                            edits carrier adapter
+                                            runs pytest
+                                            writes STATUS
+                       ┌────────────────────────┘
+                       ▼
+        cadence_loop (every 5 min)
+        claude --resume <session>
+        loops until STATUS or 30-min wall timeout
+```
+
+Tuning env vars: `REPAIR_ENABLED`, `REPAIR_MAX_WALL_SECONDS`,
+`REPAIR_RESUME_INTERVAL_SECONDS`, `REPAIR_PER_TURN_TIMEOUT_SECONDS`.
+
 ## Out of scope
 
 - Multi-tenant credential isolation.
@@ -100,3 +143,5 @@ Decision matrix (auto-insurance customer portals, US):
 - Carriers beyond USAA/Geico (others stubbed in dropdown; abstraction is in place).
 - Bot-defense evasion beyond installed Chrome over CDP and a reasonable UA.
 - "Resend MFA code" flow if the user misses the 90s window.
+- Auto-repair commits/pushes patches to git (claude writes patches to the
+  container filesystem only; an external cron is expected to pick them up).

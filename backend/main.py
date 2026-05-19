@@ -10,6 +10,7 @@ from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from sse_starlette.sse import EventSourceResponse
 
+from . import auto_repair
 from .config import settings
 from .logging_config import configure_logging
 from .models import Carrier, LoginRequest, LoginResponse, MfaRequest, SessionState
@@ -28,9 +29,18 @@ FRONTEND_DIR = Path(__file__).resolve().parent.parent / "frontend"
 async def lifespan(app: FastAPI):
     log.info("starting Playwright runner")
     await runner.start()
-    yield
-    log.info("shutting down Playwright runner")
-    await runner.shutdown()
+    repair_task = asyncio.create_task(auto_repair.cadence_loop())
+    try:
+        yield
+    finally:
+        log.info("shutting down auto-repair and Playwright runner")
+        repair_task.cancel()
+        try:
+            await repair_task
+        except asyncio.CancelledError:
+            pass
+        await auto_repair.shutdown()
+        await runner.shutdown()
 
 
 app = FastAPI(title="Infer Take-Home: Carrier Document Puller", lifespan=lifespan)

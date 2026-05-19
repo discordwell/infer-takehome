@@ -2,6 +2,43 @@
 
 ## Session Summaries
 
+### 2026-05-19 — Claude-in-container + self-healing auto-repair
+
+- Installed `@anthropic-ai/claude-code` in the prod Docker image (Node 20 via
+  NodeSource). Persistent `/root/.claude` on the `infer-claude-home` named
+  volume. Container claude is authenticated against the user's Claude.ai
+  plan (OAuth token extracted from local macOS Keychain and copied to the
+  VPS, 600 perms, root-owned). No `ANTHROPIC_API_KEY` path — env var
+  stripped from compose to lock in plan-only auth.
+- `scripts/claude-remote` opens an interactive claude session in the
+  deployed container via `ssh ovh2 + docker compose exec`.
+- Self-healing loop: `backend/auto_repair.py` + `backend/repair_prompt.md`
+  + `scripts/repair_probe.py`. On orchestrator ERROR the controller writes
+  `storage/repair/<session_id>/context.json` (+ best-effort copy of any
+  saved `storage_state` as `auth_state.json`) and spawns `claude -p` with
+  `--allowedTools Read Write Edit Bash Glob Grep`. Claude is told to
+  inspect the carrier site via `repair_probe.py` (which loads the saved
+  storage_state into a fresh logged-in browser), edit
+  `backend/carriers/<carrier>.py` if needed, run mock-mode pytest, and
+  write a `STATUS` file (`DONE` or `NEED_HUMAN`).
+- Cadence loop registered in `main.py` lifespan resumes any active repair
+  every 5 minutes via `claude --resume`; per-carrier dedup, 30-min wall
+  timeout, `REPAIR_ENABLED=false` kill switch.
+- Default behavior: `auto_repair.is_enabled()` returns False unless
+  `REPAIR_ENABLED` is explicitly set truthy (so tests don't spawn claude).
+  `docker-compose.prod.yml` sets `REPAIR_ENABLED=true` so prod is opt-in
+  via the compose file, not via in-code default.
+- Verified end-to-end against a synthetic failure context: claude read
+  context.json, ran `grep` + `pytest tests/test_integration.py` (6/6 green),
+  recognized the failure as a smoke test, wrote a thoughtful NEED_HUMAN
+  STATUS with a constructive suggestion. Wall time 105s, ~$0.30 against
+  Claude plan quota (metered, not API-billed).
+- Code review pass applied: subprocess kill on CancelledError + tracked
+  in-flight task set + `auto_repair.shutdown()` called from main.py
+  teardown; STATUS parser is now case-insensitive and lstrip-tolerant;
+  `_check_done` also runs after resume turns; prompt updated to be honest
+  about which context files are actually written.
+
 _Add session summaries above this line before context compaction. Keep only the 20 most recent._
 
 ## Key Findings
