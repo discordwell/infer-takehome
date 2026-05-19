@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+# Interactive Claude Code session inside the deployed container.
+#
+#   ./scripts/claude-remote           # open a fresh session
+#   ./scripts/claude-remote --resume  # forward args to `claude`
+#
+# Reads ssh host + remote path from the same env vars as deploy.sh.
+set -euo pipefail
+SSH_HOST="${DEPLOY_SSH_HOST:-ovh2}"
+REMOTE_PATH="${DEPLOY_REMOTE_PATH:-/opt/infer-takehome}"
+
+args=""
+for a in "$@"; do
+    args+=" $(printf %q "$a")"
+done
+
+exec ssh -t "${SSH_HOST}" "cd ${REMOTE_PATH} && docker compose -f docker-compose.prod.yml exec infer claude${args}"

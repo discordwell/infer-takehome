@@ -23,10 +23,13 @@ services:
       USAA_WORKER_BASE_URL: "${USAA_WORKER_BASE_URL:-}"
       DEV_PREFILL_CREDS: "false"
       CHROME_BINARY: "/usr/bin/google-chrome-stable"
+      ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY:-}"
     volumes:
       - infer-storage:/app/storage
+      - infer-claude-home:/root/.claude
     shm_size: "2gb"
     restart: unless-stopped
 
 volumes:
   infer-storage:
+  infer-claude-home:
