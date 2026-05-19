@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import shutil
 import socket
 import subprocess
 import time
@@ -38,6 +39,7 @@ class RepairBrowser:
     profile_dir: Path
     cdp_endpoint: str
     started_at: float
+    headed: bool
 
 
 _repair_browsers: dict[str, RepairBrowser] = {}
@@ -90,17 +92,22 @@ async def spawn(
     carrier: str,
     storage_state: dict,
     initial_url: str | None = None,
+    headed: bool = False,
 ) -> str:
     """Spawn a repair chromium with cookies pre-loaded.
 
     Returns the CDP endpoint URL. Reuses an existing browser for the same
     carrier if one is already alive.
+
+    `headed=True` launches a real Chrome via xvfb-run (when available) and
+    drops the --headless flag — useful for carriers like USAA whose Akamai
+    edge fingerprints headless chromium even after auth cookies are loaded.
     """
     async with _lock:
         existing = _repair_browsers.get(carrier)
         if existing and existing.proc.poll() is None:
             log.info(
-                "reusing existing repair browser for %s at %s",
+                "reusing existing repair browser for %s at %s (alive)",
                 carrier,
                 existing.cdp_endpoint,
             )
@@ -116,14 +123,44 @@ async def spawn(
         chrome,
         f"--remote-debugging-port={port}",
         f"--user-data-dir={profile_dir}",
-        "--headless=new",
         "--no-sandbox",
         "--no-first-run",
         "--no-default-browser-check",
         "--disable-dev-shm-usage",
         "--disable-blink-features=AutomationControlled",
-        initial_url or "about:blank",
     ]
+    xvfb_wrapped = False
+    if headed:
+        if not os.environ.get("DISPLAY") and os.name == "posix":
+            xvfb = shutil.which("xvfb-run")
+            if xvfb:
+                args = [xvfb, "-a", *args]
+                xvfb_wrapped = True
+            else:
+                log.warning(
+                    "headed repair browser requested for %s but xvfb-run not "
+                    "available; falling back to --headless=new",
+                    carrier,
+                )
+                args.append("--headless=new")
+    else:
+        args.append("--headless=new")
+    args.append(initial_url or "about:blank")
+
+    log.info(
+        "spawning repair browser carrier=%s session=%s headed=%s "
+        "xvfb=%s port=%d chrome=%s profile=%s cookies=%d initial_url=%s",
+        carrier,
+        session_id,
+        headed,
+        xvfb_wrapped,
+        port,
+        chrome,
+        profile_dir,
+        len(storage_state.get("cookies") or []),
+        initial_url or "about:blank",
+    )
+
     proc = subprocess.Popen(
         args,
         stdout=subprocess.DEVNULL,
@@ -132,7 +169,7 @@ async def spawn(
     )
 
     try:
-        await _wait_for_port(port, timeout=10.0)
+        await _wait_for_port(port, timeout=15.0 if headed else 10.0)
 
         async with async_playwright() as pw:
             browser = await pw.chromium.connect_over_cdp(cdp_endpoint)
@@ -151,10 +188,16 @@ async def spawn(
                             wait_until="domcontentloaded",
                             timeout=15_000,
                         )
+                        log.info(
+                            "repair browser navigated carrier=%s landed_url=%s",
+                            carrier,
+                            page.url,
+                        )
                     except Exception as e:  # noqa: BLE001
                         log.warning(
-                            "repair browser nav to %s failed: %s",
+                            "repair browser nav to %s failed for %s: %s",
                             initial_url,
+                            carrier,
                             e,
                         )
             finally:
@@ -167,13 +210,15 @@ async def spawn(
             profile_dir=profile_dir,
             cdp_endpoint=cdp_endpoint,
             started_at=time.time(),
+            headed=headed,
         )
         async with _lock:
             _repair_browsers[carrier] = rb
         log.info(
-            "spawned repair browser for %s session %s at %s",
+            "repair browser ready carrier=%s session=%s pid=%d endpoint=%s",
             carrier,
             session_id,
+            proc.pid,
             cdp_endpoint,
         )
         return cdp_endpoint
@@ -187,10 +232,15 @@ async def cleanup(carrier: str) -> None:
         rb = _repair_browsers.pop(carrier, None)
     if rb is None:
         return
+    was_alive = rb.proc.poll() is None
     log.info(
-        "cleaning up repair browser for %s session %s",
+        "cleanup repair browser carrier=%s session=%s pid=%d was_alive=%s "
+        "uptime=%.1fs",
         carrier,
         rb.session_id,
+        rb.proc.pid,
+        was_alive,
+        time.time() - rb.started_at,
     )
     _terminate(rb.proc)
 
@@ -208,7 +258,10 @@ def active_browsers_snapshot() -> dict[str, dict]:
             "session_id": rb.session_id,
             "cdp_endpoint": rb.cdp_endpoint,
             "started_at": rb.started_at,
+            "uptime_seconds": round(time.time() - rb.started_at, 1),
             "alive": rb.proc.poll() is None,
+            "pid": rb.proc.pid,
+            "headed": rb.headed,
         }
         for carrier, rb in _repair_browsers.items()
     }
