@@ -676,8 +676,46 @@ async def _verify_fix(
     except Exception as e:  # noqa: BLE001
         return False, f"verify setup failed: {type(e).__name__}: {e}"
 
+    # Build the same context the carrier itself uses, so the verify browser
+    # gets the carrier's stealth init script / Chrome CDP launch / UA /
+    # viewport. Without this, USAA + other Akamai-protected sites reject the
+    # verify browser as bot-shaped — claude's fix would look broken even
+    # when it isn't (see session 71a7e651 STATUS dump). Use a dedicated
+    # verify profile dir to avoid conflicting with the live orchestrator
+    # or the long-lived repair browser, which may both be open against the
+    # carrier's real profile at the same time.
+    ctx_opts: dict = {}
     try:
-        async with pw_runner.new_context(storage_state=storage_state) as ctx:
+        context_data = json.loads((out_dir / "context.json").read_text())
+        username = context_data.get("username")
+    except Exception:  # noqa: BLE001
+        username = None
+    try:
+        if username and hasattr(flow, "context_options_for_username"):
+            ctx_opts = dict(flow.context_options_for_username(username))
+        else:
+            ctx_opts = dict(flow.context_options())
+    except Exception as e:  # noqa: BLE001
+        log.warning(
+            "verify: building context_options failed for %s: %s — falling "
+            "back to bare context",
+            carrier, e,
+        )
+        ctx_opts = {}
+    # Don't reuse the live carrier's Chrome profile — concurrent Chromium
+    # processes can't share a profile dir, and the orchestrator / repair
+    # browser may still hold it.
+    verify_profile = Path("storage/browser-profiles/verify") / f"{carrier}-{session_id[:12]}"
+    verify_profile.mkdir(parents=True, exist_ok=True)
+    ctx_opts["_chrome_profile_dir"] = str(verify_profile)
+    # _initial_url is only meaningful when login_context spawns Chrome to
+    # land on a login page; the verify path navigates via fetch_documents.
+    ctx_opts.pop("_initial_url", None)
+
+    try:
+        async with pw_runner.new_context(
+            storage_state=storage_state, **ctx_opts
+        ) as ctx:
             page = await ctx.new_page()
             http = await http_from_context(ctx)
             try:
