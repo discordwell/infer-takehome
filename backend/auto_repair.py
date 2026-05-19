@@ -47,11 +47,18 @@ INITIAL_URLS = {
     "state_farm": "https://www.statefarm.com/",
 }
 
-MAX_REPAIR_WALL_SECONDS = int(os.environ.get("REPAIR_MAX_WALL_SECONDS", "1800"))
+MAX_REPAIR_WALL_SECONDS = int(os.environ.get("REPAIR_MAX_WALL_SECONDS", "18000"))
 RESUME_INTERVAL_SECONDS = int(os.environ.get("REPAIR_RESUME_INTERVAL_SECONDS", "300"))
 PER_TURN_TIMEOUT_SECONDS = int(
     os.environ.get("REPAIR_PER_TURN_TIMEOUT_SECONDS", "300")
 )
+# Verification budget per attempt. We re-run the carrier flow against the
+# saved storage_state once claude declares DONE to confirm the fix actually
+# repaired the failing step rather than being a confident-sounding no-op.
+VERIFY_TIMEOUT_SECONDS = int(os.environ.get("REPAIR_VERIFY_TIMEOUT_SECONDS", "90"))
+# stream-json lines can occasionally exceed asyncio's default 64 KB
+# StreamReader limit (large tool_result blobs with DOM dumps). Raise to 10 MB.
+STREAM_LINE_LIMIT = 10 * 1024 * 1024
 
 ALLOWED_TOOLS = ["Read", "Write", "Edit", "Bash", "Glob", "Grep"]
 
@@ -152,6 +159,7 @@ async def capture_and_kick(
         context_obj = {
             "session_id": session_id,
             "carrier": carrier,
+            "username": username,
             "step": step,
             "exception": f"{type(exception).__name__}: {exception}",
             "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
@@ -187,21 +195,21 @@ async def _kick(session_id: str, carrier: str) -> bool:
 
 
 async def _run_first_turn(session_id: str, carrier: str) -> None:
-    try:
-        if not PROMPT_PATH.exists():
-            log.warning(
-                "repair prompt missing at %s; cannot run repair", PROMPT_PATH
-            )
-            async with _lock:
-                _active.pop(carrier, None)
-            return
-        prompt_template = PROMPT_PATH.read_text()
-        prompt = (
-            f"{prompt_template}\n\n---\n\n"
-            f"Session ID: {session_id}\nCarrier: {carrier}\n\n"
-            "Begin work."
+    if not PROMPT_PATH.exists():
+        log.warning(
+            "repair prompt missing at %s; cannot run repair", PROMPT_PATH
         )
-        on_chunk = _make_chunk_publisher(session_id, turn=1)
+        async with _lock:
+            _active.pop(carrier, None)
+        return
+    prompt_template = PROMPT_PATH.read_text()
+    prompt = (
+        f"{prompt_template}\n\n---\n\n"
+        f"Session ID: {session_id}\nCarrier: {carrier}\n\n"
+        "Begin work."
+    )
+    on_chunk = _make_chunk_publisher(session_id, turn=1)
+    try:
         result = await _run_claude(
             prompt,
             resume_session_id=None,
@@ -215,16 +223,29 @@ async def _run_first_turn(session_id: str, carrier: str) -> None:
                 _active[carrier]["claude_session_id"] = result.get("session_id")
                 _active[carrier]["last_turn_at"] = time.time()
                 _active[carrier]["turns"] = 1
-        log.info(
-            "auto-repair turn 1 for %s: %s",
-            carrier,
-            (result.get("result") or "")[:240],
-        )
-        await _check_done(session_id, carrier)
     except Exception as e:  # noqa: BLE001
         log.exception("auto-repair first turn for %s failed: %s", carrier, e)
+    # Always check STATUS — claude may have written it even if our reader
+    # died (e.g. stream-json line longer than buffer limit).
+    try:
+        done = await _check_done(session_id, carrier)
+    except Exception as e:  # noqa: BLE001
+        log.warning("_check_done after first turn raised: %s", e)
+        done = False
+    if not done:
         async with _lock:
-            _active.pop(carrier, None)
+            info = _active.get(carrier)
+            if (
+                info is not None
+                and info["session_id"] == session_id
+                and not info.get("claude_session_id")
+            ):
+                log.warning(
+                    "first turn ended without claude_session_id and no "
+                    "terminal STATUS — popping carrier=%s session=%s",
+                    carrier, session_id,
+                )
+                _active.pop(carrier, None)
 
 
 def _make_chunk_publisher(
@@ -365,6 +386,7 @@ async def _run_claude(
         stdin=asyncio.subprocess.DEVNULL,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
+        limit=STREAM_LINE_LIMIT,
     )
 
     final_result: dict | None = None
@@ -380,7 +402,21 @@ async def _run_claude(
             stream_file = None
         try:
             while True:
-                line = await proc.stdout.readline()
+                try:
+                    line = await proc.stdout.readline()
+                except ValueError as e:
+                    # Line longer than StreamReader limit — drain the
+                    # rest of the chunk by reading raw bytes and skip
+                    # past the next newline so we can resume on the
+                    # following line instead of crashing the reader.
+                    log.warning(
+                        "stream readline exceeded limit, skipping line: %s", e
+                    )
+                    try:
+                        await proc.stdout.read(STREAM_LINE_LIMIT)
+                    except Exception:  # noqa: BLE001
+                        pass
+                    continue
                 if not line:
                     return
                 if stream_file is not None:
@@ -557,6 +593,136 @@ async def _write_turn_meta(
     )
 
 
+async def _verify_fix(
+    session_id: str, carrier: str
+) -> tuple[bool, str | None]:
+    """Verify a claude-claimed fix actually works.
+
+    Two checks:
+      1. `git diff backend/carriers/<carrier>.py` is non-empty (claude wrote
+         something).
+      2. The carrier's `fetch_documents` succeeds against a fresh browser
+         loaded with the saved storage_state (the same cookies that were
+         live when the original failure happened).
+
+    Returns (passed, reason). On pass, reason is None.
+    """
+    out_dir = REPAIR_ROOT / session_id
+
+    # 1) git diff non-empty
+    diff_target = f"backend/carriers/{carrier}.py"
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "git", "-C", "/app", "diff", "--", diff_target,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=20.0)
+        if not stdout.strip():
+            return (
+                False,
+                f"git diff for {diff_target} is empty — claude declared DONE "
+                "but did not modify the adapter",
+            )
+        log.info(
+            "verify carrier=%s session=%s git-diff bytes=%d",
+            carrier, session_id, len(stdout),
+        )
+    except Exception as e:  # noqa: BLE001
+        log.warning("verify: git diff check raised: %s", e)
+        # Don't fail solely on git diff infrastructure error; continue.
+
+    # 2) Replay fetch_documents against the saved storage_state
+    auth_file = out_dir / "auth_state.json"
+    if not auth_file.exists():
+        return (
+            False,
+            "no auth_state.json on disk — cannot replay carrier flow to "
+            "verify the fix",
+        )
+    try:
+        from .carriers.registry import get_flow
+        from .models import Carrier
+        from .playwright_runner import http_from_context, runner as pw_runner
+
+        storage_state = json.loads(auth_file.read_text())
+        flow = get_flow(Carrier(carrier))
+    except Exception as e:  # noqa: BLE001
+        return False, f"verify setup failed: {type(e).__name__}: {e}"
+
+    try:
+        async with pw_runner.new_context(storage_state=storage_state) as ctx:
+            page = await ctx.new_page()
+            http = await http_from_context(ctx)
+            try:
+                docs, _doc_bytes = await asyncio.wait_for(
+                    flow.fetch_documents(page, http, ctx),
+                    timeout=VERIFY_TIMEOUT_SECONDS,
+                )
+            finally:
+                await http.aclose()
+        if not docs:
+            return False, "fetch_documents returned 0 documents"
+        log.info(
+            "verify PASSED carrier=%s session=%s docs=%d",
+            carrier, session_id, len(docs),
+        )
+        return True, None
+    except asyncio.TimeoutError:
+        return (
+            False,
+            f"fetch_documents did not return within "
+            f"{VERIFY_TIMEOUT_SECONDS}s",
+        )
+    except Exception as e:  # noqa: BLE001
+        return False, f"fetch_documents raised {type(e).__name__}: {e}"
+
+
+async def _on_verification_failed(
+    session_id: str, carrier: str, reason: str, rejected_status_body: str
+) -> None:
+    """Reject the STATUS=DONE: move it aside, append the reason to
+    context.json, leave the session active so the cadence loop resumes
+    claude with the new context."""
+    log.warning(
+        "verification REJECTED carrier=%s session=%s reason=%s",
+        carrier, session_id, reason,
+    )
+    out_dir = REPAIR_ROOT / session_id
+    try:
+        rejected_path = (
+            out_dir / f"STATUS_REJECTED_turn{int(time.time())}"
+        )
+        (out_dir / "STATUS").rename(rejected_path)
+    except FileNotFoundError:
+        pass
+    except Exception as e:  # noqa: BLE001
+        log.warning("could not move rejected STATUS aside: %s", e)
+        try:
+            (out_dir / "STATUS").unlink()
+        except Exception:  # noqa: BLE001
+            pass
+
+    ctx_path = out_dir / "context.json"
+    try:
+        ctx_obj = json.loads(ctx_path.read_text())
+    except Exception:  # noqa: BLE001
+        ctx_obj = {}
+    history = ctx_obj.get("verification_failures") or []
+    history.append({
+        "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "reason": reason,
+        "rejected_status_first_line": (
+            rejected_status_body.split("\n", 1)[0][:240]
+        ),
+    })
+    ctx_obj["verification_failures"] = history
+    try:
+        ctx_path.write_text(json.dumps(ctx_obj, indent=2))
+    except Exception as e:  # noqa: BLE001
+        log.warning("could not append verification failure to context: %s", e)
+
+
 async def _check_done(session_id: str, carrier: str) -> bool:
     status_file = REPAIR_ROOT / session_id / "STATUS"
     if not status_file.exists():
@@ -564,30 +730,42 @@ async def _check_done(session_id: str, carrier: str) -> bool:
     body = status_file.read_text()
     first_line = body.split("\n", 1)[0].strip()
     normalized = first_line.lstrip("#`* ").upper()
-    if normalized.startswith("DONE") or normalized.startswith("NEED_HUMAN"):
-        verdict = "DONE" if normalized.startswith("DONE") else "NEED_HUMAN"
-        async with _lock:
-            _active.pop(carrier, None)
-        await repair_browser.cleanup(carrier)
-        log.info(
-            "STATUS complete carrier=%s session=%s verdict=%s first_line=%r "
-            "body_bytes=%d",
-            carrier, session_id, verdict, first_line[:200], len(body),
-        )
-        log.info(
-            "STATUS full body carrier=%s session=%s:\n%s",
-            carrier, session_id, body[:4000],
-        )
-        try:
-            from .session_manager import manager
+    if not (normalized.startswith("DONE") or normalized.startswith("NEED_HUMAN")):
+        return False
 
-            manager.publish_repair_done(
-                session_id, verdict=verdict, first_line=first_line[:240]
-            )
-        except Exception as e:  # noqa: BLE001
-            log.debug("publish_repair_done dropped: %s", e)
-        return True
-    return False
+    verdict = "DONE" if normalized.startswith("DONE") else "NEED_HUMAN"
+
+    if verdict == "DONE":
+        log.info(
+            "verifying DONE claim carrier=%s session=%s first_line=%r",
+            carrier, session_id, first_line[:200],
+        )
+        passed, reason = await _verify_fix(session_id, carrier)
+        if not passed:
+            await _on_verification_failed(session_id, carrier, reason or "?", body)
+            return False  # keep the session active; cadence will resume claude
+
+    async with _lock:
+        _active.pop(carrier, None)
+    await repair_browser.cleanup(carrier)
+    log.info(
+        "STATUS complete carrier=%s session=%s verdict=%s first_line=%r "
+        "body_bytes=%d",
+        carrier, session_id, verdict, first_line[:200], len(body),
+    )
+    log.info(
+        "STATUS full body carrier=%s session=%s:\n%s",
+        carrier, session_id, body[:4000],
+    )
+    try:
+        from .session_manager import manager
+
+        manager.publish_repair_done(
+            session_id, verdict=verdict, first_line=first_line[:240]
+        )
+    except Exception as e:  # noqa: BLE001
+        log.debug("publish_repair_done dropped: %s", e)
+    return True
 
 
 async def cadence_loop() -> None:
@@ -631,8 +809,16 @@ async def _resume_one(
         )
         return
     resume_prompt = (
-        "Continue. Status check: what have you found? What's next? "
-        "If you've finished, write the STATUS file now."
+        "Continue. **Re-read context.json first** — it may have a "
+        "`verification_failures` array appended since your last turn. "
+        "That array means a previous STATUS=DONE you wrote was rejected "
+        "because the controller replayed the failing carrier step and it "
+        "still didn't work. The most recent entry tells you exactly which "
+        "error came back. Use that as the real signal for what's broken — "
+        "the original `exception` field in context.json may be a downstream "
+        "symptom, not the root cause. "
+        "Status check: what have you found? What's next? "
+        "If you've truly finished, write a fresh STATUS file."
     )
     async with _lock:
         next_turn = (
