@@ -7,9 +7,10 @@ Two inspection modes:
         --storage-state storage/repair/<session>/auth_state.json \\
         --url https://carrier.example.com/docs
 
-  CDP attach mode (live failed session):
+  CDP attach mode (live repair browser):
     uv run python -m scripts.repair_probe \\
-        --cdp-endpoint http://127.0.0.1:9222
+        --cdp-endpoint "$(cat storage/repair/<session>/cdp_endpoint.txt)" \\
+        [--url https://carrier.example.com/docs]   # optional navigation
 
 Writes screenshot + full DOM to --out-dir and prints a JSON summary to stdout.
 
@@ -84,7 +85,9 @@ async def probe_storage_state(state_path: Path, url: str, out_dir: Path) -> dict
             await browser.close()
 
 
-async def probe_cdp(cdp_endpoint: str, out_dir: Path) -> dict[str, Any]:
+async def probe_cdp(
+    cdp_endpoint: str, out_dir: Path, url: str | None = None
+) -> dict[str, Any]:
     async with async_playwright() as pw:
         browser = await pw.chromium.connect_over_cdp(cdp_endpoint)
         try:
@@ -96,6 +99,8 @@ async def probe_cdp(cdp_endpoint: str, out_dir: Path) -> dict[str, Any]:
             page.on(
                 "console", lambda m: console_logs.append(f"[{m.type}] {m.text}")
             )
+            if url:
+                await page.goto(url, wait_until="domcontentloaded", timeout=30_000)
             captured = await _capture_page(page, out_dir, console_logs)
             return {"mode": "cdp", **captured}
         finally:
@@ -118,7 +123,7 @@ def main() -> int:
     args.out_dir.mkdir(parents=True, exist_ok=True)
 
     if args.cdp_endpoint:
-        result = asyncio.run(probe_cdp(args.cdp_endpoint, args.out_dir))
+        result = asyncio.run(probe_cdp(args.cdp_endpoint, args.out_dir, args.url))
     elif args.storage_state and args.url:
         result = asyncio.run(
             probe_storage_state(args.storage_state, args.url, args.out_dir)

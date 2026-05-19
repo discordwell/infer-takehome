@@ -26,12 +26,25 @@ import os
 import time
 from pathlib import Path
 
-from . import storage
+from . import repair_browser, storage
 
 log = logging.getLogger(__name__)
 
 REPAIR_ROOT = Path("storage/repair")
 PROMPT_PATH = Path(__file__).parent / "repair_prompt.md"
+
+# Public landing URLs per carrier — the repair browser navigates here so
+# claude lands on the carrier site with cookies loaded. Claude can navigate
+# elsewhere via the saved storage_state mode or by driving the CDP browser
+# directly. about:blank fallback for carriers we don't have a default for.
+INITIAL_URLS = {
+    "mercury": "https://www.mercuryinsurance.com/",
+    "usaa": "https://www.usaa.com/",
+    "geico": "https://ecams.geico.com/",
+    "progressive": "https://account.progressive.com/",
+    "allstate": "https://myaccount.allstate.com/",
+    "state_farm": "https://www.statefarm.com/",
+}
 
 MAX_REPAIR_WALL_SECONDS = int(os.environ.get("REPAIR_MAX_WALL_SECONDS", "1800"))
 RESUME_INTERVAL_SECONDS = int(os.environ.get("REPAIR_RESUME_INTERVAL_SECONDS", "300"))
@@ -74,12 +87,29 @@ async def capture_and_kick(
         out_dir = REPAIR_ROOT / session_id
         out_dir.mkdir(parents=True, exist_ok=True)
 
+        saved_state = None
         try:
-            saved = storage.load(carrier, username)
-            if saved is not None:
-                (out_dir / "auth_state.json").write_text(json.dumps(saved))
+            saved_state = storage.load(carrier, username)
+            if saved_state is not None:
+                (out_dir / "auth_state.json").write_text(json.dumps(saved_state))
         except Exception as cap_err:  # noqa: BLE001
             log.warning("could not copy saved storage_state: %s", cap_err)
+
+        if saved_state is not None:
+            try:
+                cdp_endpoint = await repair_browser.spawn(
+                    session_id,
+                    carrier,
+                    saved_state,
+                    INITIAL_URLS.get(carrier),
+                )
+                (out_dir / "cdp_endpoint.txt").write_text(cdp_endpoint + "\n")
+            except Exception as br_err:  # noqa: BLE001
+                log.warning(
+                    "repair browser spawn for %s failed: %s",
+                    carrier,
+                    br_err,
+                )
 
         context_obj = {
             "session_id": session_id,
@@ -204,6 +234,7 @@ async def _check_done(session_id: str, carrier: str) -> bool:
     if normalized.startswith("DONE") or normalized.startswith("NEED_HUMAN"):
         async with _lock:
             _active.pop(carrier, None)
+        await repair_browser.cleanup(carrier)
         log.info(
             "auto-repair complete for %s: %s", carrier, first_line[:200]
         )
@@ -295,6 +326,7 @@ async def _timeout_repair(session_id: str, carrier: str) -> None:
         log.warning("failed to write timeout STATUS: %s", e)
     async with _lock:
         _active.pop(carrier, None)
+    await repair_browser.cleanup(carrier)
 
 
 def active_repairs_snapshot() -> dict[str, dict]:
@@ -303,13 +335,14 @@ def active_repairs_snapshot() -> dict[str, dict]:
 
 
 async def shutdown() -> None:
-    """Cancel any in-flight repair turns. Called from main.py lifespan teardown."""
-    if not _inflight_tasks:
-        return
-    log.info(
-        "auto-repair shutdown: cancelling %d in-flight task(s)",
-        len(_inflight_tasks),
-    )
-    for task in list(_inflight_tasks):
-        task.cancel()
-    await asyncio.gather(*_inflight_tasks, return_exceptions=True)
+    """Cancel any in-flight repair turns and kill any repair browsers.
+    Called from main.py lifespan teardown."""
+    if _inflight_tasks:
+        log.info(
+            "auto-repair shutdown: cancelling %d in-flight task(s)",
+            len(_inflight_tasks),
+        )
+        for task in list(_inflight_tasks):
+            task.cancel()
+        await asyncio.gather(*_inflight_tasks, return_exceptions=True)
+    await repair_browser.cleanup_all()

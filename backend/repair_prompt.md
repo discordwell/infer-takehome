@@ -15,9 +15,8 @@ You will be told:
 - `CARRIER` — which carrier adapter (mercury, usaa, geico, progressive, etc.)
 
 The failed session has dropped context at `storage/repair/<SESSION_ID>/`.
-**Always start by listing that directory** to see what's actually available
-— the controller drops a minimum context but richer artifacts are
-opportunistic. Likely contents:
+**Always start by listing that directory** to see what's actually available.
+Likely contents:
 
 - `context.json` — **always present.** Carrier, the orchestrator step that
   broke, the exception message, timestamp.
@@ -25,13 +24,18 @@ opportunistic. Likely contents:
   this user.** Playwright `storage_state` (cookies + localStorage). Loading
   it into Playwright gives you a logged-in browser without any real
   credentials.
-- `screenshot.png`, `dom.html`, `console.log`, `cdp_endpoint.txt` —
-  _optional_. Not currently emitted by the controller; check first, fall
-  back to running a probe yourself when missing.
+- `cdp_endpoint.txt` — **present when `auth_state.json` is present.** The
+  URL of a long-lived headless chromium that the controller spawned with
+  those cookies pre-loaded and the carrier's landing page open. Attach to
+  it via the probe in CDP mode (see below) to drive the carrier site as
+  the logged-in user, *without* respawning a fresh browser per probe call
+  — state survives across probe invocations.
+- `screenshot.png`, `dom.html`, `console.log` — _optional_. Not currently
+  emitted; capture them yourself via a probe when needed.
 
-If `auth_state.json` is missing, you are working from logs only — you can
-still read the carrier adapter and propose patches, but you cannot probe
-the carrier site as the user.
+If `auth_state.json` and `cdp_endpoint.txt` are both missing, you are
+working from logs only — you can still read the carrier adapter and propose
+patches, but you cannot probe the carrier site as the user.
 
 ## What you can do
 
@@ -39,20 +43,26 @@ the carrier site as the user.
   flow, timing, etc. The adapter for the failing carrier is your primary
   target.
 - **Inspect the carrier site as the logged-in user** without using
-  credentials:
+  credentials. Two modes:
 
   ```bash
-  # logged-in fresh browser
-  uv run python -m scripts.repair_probe \
-      --storage-state storage/repair/<SESSION_ID>/auth_state.json \
-      --url <URL_FROM_CONTEXT> \
-      --out-dir storage/repair/<SESSION_ID>/probes/<n>
-
-  # attach to the live failed tab (if cdp_endpoint.txt exists)
+  # mode A — attach to the live repair browser (state persists across probes)
   uv run python -m scripts.repair_probe \
       --cdp-endpoint "$(cat storage/repair/<SESSION_ID>/cdp_endpoint.txt)" \
+      [--url https://carrier.example.com/path] \
+      --out-dir storage/repair/<SESSION_ID>/probes/<n>
+
+  # mode B — spawn a fresh logged-in browser per probe (stateless)
+  uv run python -m scripts.repair_probe \
+      --storage-state storage/repair/<SESSION_ID>/auth_state.json \
+      --url https://carrier.example.com/path \
       --out-dir storage/repair/<SESSION_ID>/probes/<n>
   ```
+
+  **Prefer mode A when `cdp_endpoint.txt` exists** — it lets you accumulate
+  state across multiple probe calls (navigation, scroll, expanded sections)
+  rather than starting fresh each time. Mode B is the fallback when no
+  repair browser was spawned.
 
   The probe writes a screenshot + full DOM + JSON summary to `--out-dir`.
 

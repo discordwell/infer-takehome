@@ -38,6 +38,15 @@
   teardown; STATUS parser is now case-insensitive and lstrip-tolerant;
   `_check_done` also runs after resume turns; prompt updated to be honest
   about which context files are actually written.
+- CDP attach added in follow-up: `backend/repair_browser.py` spawns a
+  long-lived headless chromium with `--remote-debugging-port=0`, preloads
+  cookies from the saved storage_state via a transient Playwright connect,
+  then disconnects (chromium keeps running). `auto_repair.capture_and_kick`
+  writes `cdp_endpoint.txt` so claude can attach via
+  `repair_probe.py --cdp-endpoint <url> [--url <nav>]`. State persists
+  across multiple probe calls in the same session. Cleanup hooks fire on
+  STATUS, wall-time timeout, and lifespan teardown. Smoke-tested with a
+  fake storage_state against example.com.
 
 _Add session summaries above this line before context compaction. Keep only the 20 most recent._
 
