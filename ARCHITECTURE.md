@@ -53,7 +53,16 @@ USAA-specific Playwright flow. USAA's Akamai edge rejects normal Playwright-laun
 Drop-in replacement for testing the stack without real credentials. Enable with `CARRIER_MOCK=1`. Used by the integration tests and lets reviewers exercise the full UI flow.
 
 ### `backend/main.py`
-FastAPI app: `POST /api/login`, `GET /api/status/{id}` (SSE), `POST /api/mfa/{id}`, `GET /api/docs/{id}/{doc_id}`. Mounts `frontend/` as static.
+FastAPI app: `POST /api/login`, `GET /api/status/{id}` (SSE), `POST /api/mfa/{id}`, `GET /api/docs/{id}/{doc_id}`, `GET /api/cache` (boring per-uid fallback). Mounts `frontend/` as static. Issues a `demo_uid` cookie on first response via `identity.py`.
+
+### `backend/identity.py`
+Cookie-based user identity (`demo_uid`, 30d, HttpOnly). NAT-resilient — different browsers behind the same NAT get different uids. Not authentication; whoever holds the cookie owns the slot and per-uid cache.
+
+### `backend/slot_manager.py`
+In-process coordinator with two responsibilities:
+- One active slot per uid, with a 60s idle TTL refreshed by SSE heartbeats.
+- Per-carrier exclusive ownership: only one uid drives a given carrier at a time. A second uid hitting the same carrier gets `423 carrier-busy` from `/api/login` with a `boring_url` pointing at `/api/cache`.
+All methods are intentionally synchronous so single-event-loop atomicity holds without locks.
 
 ### `frontend/`
 Five DOM states swapped by JS (form, waiting, MFA, docs, error). SSE via `EventSource`. PDFs rendered inline with `<embed>` + a download button per doc.
@@ -136,10 +145,23 @@ orchestrator ERROR ──► capture_and_kick ──► claude -p (subprocess)
 Tuning env vars: `REPAIR_ENABLED`, `REPAIR_MAX_WALL_SECONDS`,
 `REPAIR_RESUME_INTERVAL_SECONDS`, `REPAIR_PER_TURN_TIMEOUT_SECONDS`.
 
+## Multi-session behavior
+
+- **Identity:** `demo_uid` cookie issued on first response. Stored as plain HttpOnly cookie; no auth.
+- **Slot:** one active session per uid (`slot_manager.py`). Same uid reloading the page resumes the in-flight session; different uids get distinct slots.
+- **Per-carrier lock:** a given carrier is owned by at most one uid at a time. Second uid → `423 carrier-busy`; the UI then shows the boring view sourced from `/api/cache` (that uid's own past results, privacy-isolated).
+- **Cache scope:** result_store maintains a per-uid index (`storage/results/_uid_index/<uid>.json`). Each uid only ever sees its own completed runs.
+- **Slot release:** SSE heartbeats every 15s refresh the slot; 60s of silence (closed tab) auto-releases. `DONE`/`repair_done` also release.
+
+## Live auto-repair UI
+
+When the orchestrator fails and `auto_repair.capture_and_kick` returns True, the session's `repair_kicked` flag is set so the SSE stays open past `ERROR`. `auto_repair._run_claude` runs claude with `--output-format stream-json --verbose`, translates each assistant text / `tool_use` / `tool_result` block into a display chunk, and pushes them through `session_manager.publish_repair_log` to the triggering session's SSE. The frontend renders these live in a collapsible "Claude is repairing this carrier" panel; final STATUS (`DONE` / `NEED_HUMAN`) is surfaced via a `repair_done` event.
+
 ## Out of scope
 
+- Real authentication (cookies identify but don't authenticate).
 - Multi-tenant credential isolation.
-- Concurrent users (the in-process manager assumes one user at a time).
+- Concurrent users on the **same carrier** at the same time (intentional — Playwright/CDP contention).
 - Carriers beyond USAA/Geico (others stubbed in dropdown; abstraction is in place).
 - Bot-defense evasion beyond installed Chrome over CDP and a reasonable UA.
 - "Resend MFA code" flow if the user misses the 90s window.

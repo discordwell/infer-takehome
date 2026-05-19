@@ -1,5 +1,5 @@
 (() => {
-  const STATES = ["form", "waiting", "mfa", "docs", "error"];
+  const STATES = ["form", "waiting", "mfa", "docs", "error", "boring"];
   const SERVER_STATE_LABELS = {
     IDLE: "Initializing",
     LOGGING_IN: "Signing in to the carrier",
@@ -14,6 +14,7 @@
   let eventSource = null;
   let mfaStartTs = null;
   let devCredentials = {};
+  let lastAttemptedCarrier = null;
 
   function show(name) {
     for (const s of STATES) {
@@ -32,6 +33,17 @@
     show("error");
   }
 
+  function clearRepairPanel() {
+    document.getElementById("repair-panel").classList.add("hidden");
+    document.getElementById("repair-log").innerHTML = "";
+    const verdict = document.getElementById("repair-verdict");
+    verdict.classList.add("hidden");
+    verdict.classList.remove("done", "need_human");
+    verdict.textContent = "";
+    document.getElementById("repair-status-label").textContent =
+      "Claude is debugging";
+  }
+
   function resetUI() {
     if (eventSource) { eventSource.close(); eventSource = null; }
     sessionId = null;
@@ -42,6 +54,7 @@
     document.getElementById("docs-list").innerHTML = "";
     document.getElementById("docs-summary").textContent = "";
     document.getElementById("docs-latency").textContent = "";
+    clearRepairPanel();
     show("form");
   }
 
@@ -50,14 +63,15 @@
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
+      credentials: "same-origin",
     });
     if (!r.ok) {
-      let msg = `${r.status} ${r.statusText}`;
-      try {
-        const j = await r.json();
-        if (j.detail) msg = j.detail;
-      } catch (_) { /* noop */ }
-      throw new Error(msg);
+      let payload = null;
+      try { payload = await r.json(); } catch (_) { /* noop */ }
+      const err = new Error(payload?.detail || `${r.status} ${r.statusText}`);
+      err.status = r.status;
+      err.payload = payload;
+      throw err;
     }
     return r.json();
   }
@@ -68,7 +82,17 @@
     const handler = (evt) => {
       let payload;
       try { payload = JSON.parse(evt.data); } catch (e) { return; }
-      const { state, detail, docs, error, timings_ms } = payload;
+      const { state, detail, docs, error, timings_ms, event } = payload;
+
+      if (event === "repair_log") {
+        appendRepairChunk(payload.repair_chunk);
+        return;
+      }
+      if (event === "repair_done") {
+        showRepairVerdict(payload.repair_chunk);
+        return;
+      }
+
       setStatus(state, detail);
 
       if (state === "MFA_REQUIRED") {
@@ -80,16 +104,66 @@
         if (state === "DONE" && eventSource) { eventSource.close(); eventSource = null; }
       } else if (state === "ERROR") {
         showError(error || "Server error");
-        if (eventSource) { eventSource.close(); eventSource = null; }
+        // Don't close the EventSource immediately — auto-repair may stream
+        // repair_log events into the same stream.
       }
     };
 
     eventSource.addEventListener("state_change", handler);
     eventSource.addEventListener("docs_ready", handler);
+    eventSource.addEventListener("repair_log", handler);
+    eventSource.addEventListener("repair_done", handler);
     eventSource.addEventListener("error", (e) => {
-      // SSE 'error' event fires on connection error too — distinguish via data
       if (e.data) handler(e);
     });
+  }
+
+  function appendRepairChunk(chunk) {
+    if (!chunk) return;
+    const panel = document.getElementById("repair-panel");
+    panel.classList.remove("hidden");
+    const list = document.getElementById("repair-log");
+    const li = document.createElement("li");
+    li.classList.add(`chunk-${chunk.kind || "text"}`);
+    const turnTag = document.createElement("span");
+    turnTag.className = "chunk-turn-label";
+    turnTag.textContent = `t${chunk.turn || "?"}`;
+    li.appendChild(turnTag);
+    const body = document.createElement("span");
+    body.textContent = renderChunkText(chunk);
+    li.appendChild(body);
+    list.appendChild(li);
+    list.scrollTop = list.scrollHeight;
+  }
+
+  function renderChunkText(chunk) {
+    if (chunk.kind === "tool_use") {
+      return `[${chunk.tool}] ${chunk.input_preview || ""}`;
+    }
+    if (chunk.kind === "tool_result") {
+      return `[tool result] ${chunk.text_preview || ""}`;
+    }
+    if (chunk.kind === "turn_end") {
+      return `[turn end] ${chunk.text || ""}`;
+    }
+    return chunk.text || "";
+  }
+
+  function showRepairVerdict(chunk) {
+    if (!chunk) return;
+    const panel = document.getElementById("repair-panel");
+    panel.classList.remove("hidden");
+    const verdict = document.getElementById("repair-verdict");
+    const label = document.getElementById("repair-status-label");
+    const cls = (chunk.verdict || "").toLowerCase() === "done" ? "done" : "need_human";
+    verdict.classList.remove("hidden", "done", "need_human");
+    verdict.classList.add(cls);
+    verdict.textContent = chunk.first_line || `Verdict: ${chunk.verdict}`;
+    label.textContent =
+      cls === "done"
+        ? "Repair complete — retry your login when ready."
+        : "Repair handed off — needs a human.";
+    if (eventSource) { eventSource.close(); eventSource = null; }
   }
 
   function renderDocs(docs, timingsMs, complete = true) {
@@ -137,6 +211,51 @@
     }[c]));
   }
 
+  async function showBoringFallback(carrier) {
+    show("boring");
+    const list = document.getElementById("boring-cache-list");
+    const empty = document.getElementById("boring-cache-empty");
+    const detail = document.getElementById("boring-detail");
+    detail.textContent = `${carrier ? carrier.toUpperCase() : "This carrier"} is currently being driven by another browser. Here's what's cached for your browser; click "Try again" to retake the slot when it frees up.`;
+    list.innerHTML = "";
+    empty.classList.add("hidden");
+    try {
+      const r = await fetch("/api/cache", { credentials: "same-origin" });
+      if (!r.ok) {
+        empty.classList.remove("hidden");
+        empty.textContent = "Couldn't load your cache. Try again in a moment.";
+        return;
+      }
+      const data = await r.json();
+      if (!data.results || data.results.length === 0) {
+        empty.classList.remove("hidden");
+        return;
+      }
+      for (const entry of data.results) {
+        const li = document.createElement("li");
+        const carrierName = entry.carrier;
+        const savedDate = entry.saved_at
+          ? new Date(entry.saved_at * 1000).toLocaleString()
+          : "";
+        const docsHtml = entry.docs
+          .map(
+            (d) =>
+              `<li><a href="/api/docs/${entry.session_id}/${encodeURIComponent(d.id)}" target="_blank">${escapeHtml(d.name)}</a> <span class="cache-meta">(${(d.size_bytes / 1024).toFixed(1)} KB)</span></li>`
+          )
+          .join("");
+        li.innerHTML = `
+          <div class="cache-carrier">${escapeHtml(carrierName.toUpperCase())}</div>
+          <div class="cache-meta">${entry.docs.length} cached document${entry.docs.length === 1 ? "" : "s"} &middot; ${escapeHtml(savedDate)}</div>
+          <ul class="cache-docs">${docsHtml}</ul>
+        `;
+        list.appendChild(li);
+      }
+    } catch (e) {
+      empty.classList.remove("hidden");
+      empty.textContent = "Couldn't load your cache: " + e.message;
+    }
+  }
+
   async function loadDevCredentials() {
     try {
       const r = await fetch("/api/dev/credentials", { cache: "no-store" });
@@ -166,6 +285,8 @@
     if (submitBtn.disabled) return;
     submitBtn.disabled = true;
     const data = Object.fromEntries(new FormData(e.target).entries());
+    lastAttemptedCarrier = data.carrier;
+    clearRepairPanel();
     show("waiting");
     setStatus("LOGGING_IN", "Submitting credentials");
     try {
@@ -173,7 +294,11 @@
       sessionId = session_id;
       listenForStatus(sessionId);
     } catch (err) {
-      showError(err.message);
+      if (err.status === 423 && err.payload?.detail === "carrier-busy") {
+        await showBoringFallback(err.payload.carrier || lastAttemptedCarrier);
+      } else {
+        showError(err.message);
+      }
     } finally {
       submitBtn.disabled = false;
     }
@@ -182,7 +307,7 @@
   document.getElementById("mfa-form").addEventListener("submit", async (e) => {
     e.preventDefault();
     const submitBtn = e.target.querySelector("button[type=submit]");
-    if (submitBtn.disabled) return; // double-click guard
+    if (submitBtn.disabled) return;
     submitBtn.disabled = true;
     const data = Object.fromEntries(new FormData(e.target).entries());
     mfaStartTs = performance.now();
@@ -199,5 +324,6 @@
 
   document.getElementById("restart-btn").addEventListener("click", resetUI);
   document.getElementById("error-restart-btn").addEventListener("click", resetUI);
+  document.getElementById("boring-retry-btn").addEventListener("click", resetUI);
   loadDevCredentials();
 })();

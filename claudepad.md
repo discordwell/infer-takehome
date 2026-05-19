@@ -2,6 +2,53 @@
 
 ## Session Summaries
 
+### 2026-05-19 — Multi-session support: per-uid slot, per-carrier lock, live Claude UI
+
+- **Identity** (`backend/identity.py` new): `demo_uid` cookie issued on first
+  response, 30-day HttpOnly, Secure via X-Forwarded-Proto (first hop only).
+  NAT-resilient — two browsers on the same NAT get different uids.
+- **Slot manager** (`backend/slot_manager.py` new): one active slot per uid
+  with 60s idle TTL (refreshed by SSE heartbeats). Per-carrier exclusion —
+  only one uid drives a given carrier at a time. Methods are deliberately
+  sync; docstring warns that adding `await` would create a TOCTOU on carrier
+  ownership.
+- **`/api/login`** claims the slot BEFORE minting the Session (no phantom
+  Session on 423). Returns `423 {"detail":"carrier-busy","boring_url":
+  "/api/cache"}` when another uid owns the carrier. Same uid + same carrier
+  resumes their in-flight session.
+- **Boring endpoint** (`/api/cache`): per-uid past results via
+  `result_store.latest_for_uid()`. Privacy — each uid only ever sees its own
+  runs (per-uid index at `storage/results/_uid_index/<uid>.json`).
+- **Live Claude UI**: `auto_repair._run_claude` switched to `--output-format
+  stream-json --verbose`. Each assistant text / tool_use / tool_result block
+  is translated to a display chunk (returns a list so multi-block messages
+  aren't dropped) and pushed through `session_manager.publish_repair_log`
+  to the triggering session's SSE as `repair_log` events. Final STATUS
+  surfaced as `repair_done`. Per-turn transcripts persisted under
+  `storage/repair/<session>/turns/<n>/`.
+- **SSE keep-alive** on ERROR now gates on `session.repair_kicked` (set by
+  the orchestrator when `capture_and_kick` returns True). Fixes the bug
+  where per-carrier dedup would leave the stream hanging forever for the
+  second-failing session.
+- **Frontend**: new "boring" state (carrier-in-use banner + per-uid cache
+  list), collapsible Claude log panel with color-coded chunks, verdict
+  banner on `repair_done`.
+- **Tests**: 30 new tests (slot manager, identity, per-uid cache,
+  423-carrier-busy, same-uid reload, cache isolation). Conftest adds
+  autouse `reset_slot_manager`, `reset_session_manager` (cancels pending
+  orchestrator tasks), and `short_mfa_timeout` (2s) so test teardown doesn't
+  sit on the 300s default MFA timeout. All 103 offline tests pass in ~13s.
+- **Wet test**: two browser tabs across `127.0.0.1` and `localhost`
+  (separate cookie jars). First claimed geico, second got the boring page;
+  slot released on DONE so second could then claim; per-uid cache returned
+  correct (privacy-isolated) data; repair-log panel rendered correctly.
+- **Code-review fixes applied** (general-purpose sub-agent review):
+  cleaner `_json()` helper instead of `_wrap_response` raw-header hack;
+  claim before create in `/api/login`; tightened `X-Forwarded-Proto`
+  parsing; `_translate_stream_event` returns a list; stdout drain is now
+  unbounded (readline returns empty on EOF); `slot_manager` sync-only
+  invariant documented.
+
 ### 2026-05-19 — Claude-in-container + self-healing auto-repair
 
 - Installed `@anthropic-ai/claude-code` in the prod Docker image (Node 20 via

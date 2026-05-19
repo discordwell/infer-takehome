@@ -46,7 +46,12 @@ class Document(BaseModel):
 
 class StatusEvent(BaseModel):
     event: Literal[
-        "state_change", "docs_ready", "error", "heartbeat"
+        "state_change",
+        "docs_ready",
+        "error",
+        "heartbeat",
+        "repair_log",
+        "repair_done",
     ] = "state_change"
     state: SessionState
     detail: str | None = None
@@ -54,3 +59,7 @@ class StatusEvent(BaseModel):
     error: str | None = None
     server_ts_ms: int | None = None
     timings_ms: dict[str, int] | None = None
+    # When event == repair_log, carries one incremental chunk of Claude output.
+    # When event == repair_done, carries the final STATUS verdict.
+    repair_chunk: dict | None = None
+    repair_active: bool | None = None

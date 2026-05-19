@@ -55,3 +55,34 @@ button:disabled { background: #888; cursor: not-allowed; }
 @keyframes spin { to { transform: rotate(360deg); } }
 
 #error-msg { color: #b00020; padding: 0.75rem; background: #fff0f0; border: 1px solid #ffd0d0; border-radius: 3px; }
+
+/* Boring (per-uid cache fallback) view */
+#boring-cache-list { list-style: none; padding: 0; margin: 1rem 0; display: flex; flex-direction: column; gap: 0.75rem; }
+#boring-cache-list li { border: 1px solid #ddd; border-radius: 3px; padding: 0.6rem 0.75rem; background: #fdfdfd; }
+#boring-cache-list .cache-carrier { font-weight: 600; }
+#boring-cache-list .cache-meta { font-size: 0.8rem; color: #666; }
+#boring-cache-list .cache-docs { margin: 0.5rem 0 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 0.35rem; }
+#boring-cache-list .cache-docs a { color: #1a4fa0; text-decoration: none; }
+#boring-cache-list .cache-docs a:hover { text-decoration: underline; }
+
+/* Repair panel — shown above the active state when Claude is patching the carrier */
+.repair-panel { margin-top: 1rem; border-color: #cfa400; background: #fffaea; }
+.repair-panel h2 { font-size: 1rem; }
+.repair-panel details { margin-top: 0.5rem; }
+.repair-panel summary { cursor: pointer; font-size: 0.85rem; color: #555; }
+#repair-log {
+  font-family: ui-monospace, Menlo, monospace; font-size: 0.78rem;
+  background: #1c1c1c; color: #eee; padding: 0.6rem; border-radius: 3px;
+  max-height: 320px; overflow-y: auto;
+  list-style-position: inside; margin: 0.5rem 0 0;
+}
+#repair-log li { padding: 0.15rem 0; border-bottom: 1px solid #2a2a2a; white-space: pre-wrap; word-break: break-word; }
+#repair-log li:last-child { border-bottom: none; }
+#repair-log .chunk-text { color: #d9f7d9; }
+#repair-log .chunk-tool_use { color: #ffd479; }
+#repair-log .chunk-tool_result { color: #aac6ff; }
+#repair-log .chunk-turn_end { color: #ccc; font-style: italic; }
+#repair-log .chunk-turn-label { color: #888; margin-right: 0.4rem; }
+#repair-verdict { margin-top: 0.6rem; padding: 0.6rem; border-radius: 3px; font-size: 0.9rem; }
+#repair-verdict.done { background: #e8f7e8; border: 1px solid #b2e0b2; color: #246624; }
+#repair-verdict.need_human { background: #fff0f0; border: 1px solid #ffd0d0; color: #8a1010; }

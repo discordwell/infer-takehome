@@ -237,19 +237,22 @@ def _make_chunk_publisher(
     from .session_manager import manager
 
     def _publish(event: dict) -> None:
-        chunk = _translate_stream_event(event, turn=turn)
-        if chunk is None:
-            return
-        try:
-            manager.publish_repair_log(session_id, chunk)
-        except Exception as e:  # noqa: BLE001
-            log.debug("publish_repair_log dropped: %s", e)
+        for chunk in _translate_stream_event(event, turn=turn):
+            try:
+                manager.publish_repair_log(session_id, chunk)
+            except Exception as e:  # noqa: BLE001
+                log.debug("publish_repair_log dropped: %s", e)
 
     return _publish
 
 
-def _translate_stream_event(event: dict, *, turn: int) -> dict | None:
-    """Map a stream-json line to a display chunk, or None to skip."""
+def _translate_stream_event(event: dict, *, turn: int) -> list[dict]:
+    """Map a stream-json line to zero or more display chunks.
+
+    Assistant messages routinely contain [text, tool_use, text] sequences;
+    returning a list (not a single chunk) avoids dropping later blocks.
+    """
+    out: list[dict] = []
     evt_type = event.get("type")
     if evt_type == "assistant":
         message = event.get("message") or {}
@@ -259,36 +262,38 @@ def _translate_stream_event(event: dict, *, turn: int) -> dict | None:
                 text = (block.get("text") or "").strip()
                 if not text:
                     continue
-                return {"turn": turn, "kind": "text", "text": text}
-            if kind == "tool_use":
+                out.append({"turn": turn, "kind": "text", "text": text})
+            elif kind == "tool_use":
                 tool = block.get("name") or "tool"
                 inp = block.get("input") or {}
-                preview = _preview_dict(inp)
-                return {
-                    "turn": turn,
-                    "kind": "tool_use",
-                    "tool": tool,
-                    "input_preview": preview,
-                }
+                out.append(
+                    {
+                        "turn": turn,
+                        "kind": "tool_use",
+                        "tool": tool,
+                        "input_preview": _preview_dict(inp),
+                    }
+                )
     elif evt_type == "user":
         message = event.get("message") or {}
         for block in message.get("content") or []:
-            if block.get("type") == "tool_result":
-                content = block.get("content")
-                text = _stringify_tool_result(content)
-                if not text:
-                    continue
-                return {
+            if block.get("type") != "tool_result":
+                continue
+            text = _stringify_tool_result(block.get("content"))
+            if not text:
+                continue
+            out.append(
+                {
                     "turn": turn,
                     "kind": "tool_result",
                     "text_preview": text[:600],
                 }
+            )
     elif evt_type == "result":
         text = (event.get("result") or "").strip()
-        if not text:
-            return None
-        return {"turn": turn, "kind": "turn_end", "text": text[:600]}
-    return None
+        if text:
+            out.append({"turn": turn, "kind": "turn_end", "text": text[:600]})
+    return out
 
 
 def _stringify_tool_result(content) -> str:
@@ -423,12 +428,10 @@ async def _run_claude(
             timed_out = True
             proc.kill()
             await proc.wait()
-            read_task.cancel()
-        # Drain remaining stdout after process exit.
-        try:
-            await asyncio.wait_for(read_task, timeout=5.0)
-        except asyncio.TimeoutError:
-            read_task.cancel()
+        # Drain remaining stdout. readline returns empty when the pipe closes
+        # — no need to cap with a timeout, which would silently lose buffered
+        # events.
+        await read_task
     except asyncio.CancelledError:
         proc.kill()
         try:

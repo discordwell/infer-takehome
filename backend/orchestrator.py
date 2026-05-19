@@ -59,9 +59,15 @@ async def execute_login(
         log.exception("login flow failed for session %s", session_id)
         manager.set_error(session_id, str(e) or e.__class__.__name__)
         try:
-            await auto_repair.capture_and_kick(
+            kicked = await auto_repair.capture_and_kick(
                 session_id, carrier.value, username, e
             )
+            if kicked:
+                try:
+                    session = manager.get(session_id)
+                    session.repair_kicked = True
+                except Exception:  # noqa: BLE001
+                    pass
         except Exception as repair_err:  # noqa: BLE001
             log.warning(
                 "auto-repair kick failed for session %s: %s",

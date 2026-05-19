@@ -27,6 +27,9 @@ class Session:
     created_at: float = field(default_factory=time.time)
     subscribers: list[asyncio.Queue[StatusEvent]] = field(default_factory=list)
     task: asyncio.Task | None = None
+    uid: str | None = None
+    repair_log: list[dict] = field(default_factory=list)
+    repair_kicked: bool = False
 
 
 class SessionNotFoundError(Exception):
@@ -38,10 +41,14 @@ class SessionManager:
         self._sessions: dict[str, Session] = {}
         self._ttl = ttl_seconds
 
-    def create(self, carrier: Carrier, username: str) -> Session:
+    def create(
+        self, carrier: Carrier, username: str, uid: str | None = None
+    ) -> Session:
         self._prune_stale()
         session_id = uuid.uuid4().hex
-        session = Session(id=session_id, carrier=carrier, username=username)
+        session = Session(
+            id=session_id, carrier=carrier, username=username, uid=uid
+        )
         self._sessions[session_id] = session
         return session
 
@@ -51,6 +58,14 @@ class SessionManager:
             raise SessionNotFoundError(session_id)
         return session
 
+    def discard(self, session_id: str) -> None:
+        """Remove a session that was created but never started.
+
+        Used by /api/login when a slot claim fails after session creation."""
+        session = self._sessions.pop(session_id, None)
+        if session and session.task and not session.task.done():
+            session.task.cancel()
+
     def attach_task(self, session_id: str, task: asyncio.Task) -> None:
         self.get(session_id).task = task
 
@@ -58,6 +73,18 @@ class SessionManager:
         session = self.get(session_id)
         queue: asyncio.Queue[StatusEvent] = asyncio.Queue()
         session.subscribers.append(queue)
+        # Replay any accumulated repair_log so a late SSE reconnect catches up.
+        for chunk in session.repair_log:
+            queue.put_nowait(
+                StatusEvent(
+                    event="repair_log",
+                    state=session.state,
+                    detail=session.detail,
+                    server_ts_ms=int(time.time() * 1000),
+                    repair_chunk=chunk,
+                    repair_active=True,
+                )
+            )
         queue.put_nowait(self._snapshot(session))
         return queue
 
@@ -99,6 +126,7 @@ class SessionManager:
                 docs=docs,
                 doc_bytes=doc_bytes,
                 timings_ms=timings_ms,
+                uid=session.uid,
             )
         self._publish(session, event="docs_ready")
 
@@ -127,6 +155,56 @@ class SessionManager:
         session.state = SessionState.ERROR
         session.error = error
         self._publish(session, event="error")
+
+    def publish_repair_log(
+        self,
+        session_id: str,
+        chunk: dict,
+        *,
+        active: bool = True,
+    ) -> None:
+        """Push an incremental Claude-output chunk to SSE subscribers.
+
+        Callers (auto_repair) provide a dict like {turn, kind, text}. We retain
+        the last entries on the session so a late SSE subscriber can replay.
+        """
+        session = self._sessions.get(session_id)
+        if session is None:
+            return
+        session.repair_log.append(chunk)
+        # No back-pressure cap by design — user wanted full firehose.
+        snapshot = StatusEvent(
+            event="repair_log",
+            state=session.state,
+            detail=session.detail,
+            server_ts_ms=int(time.time() * 1000),
+            repair_chunk=chunk,
+            repair_active=active,
+        )
+        for q in session.subscribers:
+            q.put_nowait(snapshot)
+
+    def publish_repair_done(
+        self,
+        session_id: str,
+        verdict: str,
+        *,
+        first_line: str,
+    ) -> None:
+        session = self._sessions.get(session_id)
+        if session is None:
+            return
+        chunk = {"verdict": verdict, "first_line": first_line}
+        snapshot = StatusEvent(
+            event="repair_done",
+            state=session.state,
+            detail=session.detail,
+            server_ts_ms=int(time.time() * 1000),
+            repair_chunk=chunk,
+            repair_active=False,
+        )
+        for q in session.subscribers:
+            q.put_nowait(snapshot)
 
     async def request_mfa(self, session_id: str, timeout: float = 90.0) -> str:
         """Called by the carrier flow when MFA is required.

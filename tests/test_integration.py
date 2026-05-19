@@ -112,6 +112,111 @@ async def test_doc_for_unknown_doc_id_404s(client):
     assert r.status_code == 404
 
 
+async def test_second_uid_gets_423_on_busy_carrier(
+    fake_playwright, mock_carrier, tmp_session_dir
+):
+    """First browser claims geico; a second browser (separate cookie jar) gets
+    423 carrier-busy until the first releases the slot."""
+    transport = httpx.ASGITransport(app=app)
+    async with app.router.lifespan_context(app):
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://test"
+        ) as browser_a, httpx.AsyncClient(
+            transport=transport, base_url="http://test"
+        ) as browser_b:
+            ra = await browser_a.post(
+                "/api/login",
+                json={"carrier": "geico", "username": "a", "password": "pw"},
+            )
+            assert ra.status_code == 200
+            sid_a = ra.json()["session_id"]
+            # The cookie was issued on the first response.
+            assert "demo_uid" in browser_a.cookies
+
+            # Second browser (no cookie) tries the same carrier.
+            rb = await browser_b.post(
+                "/api/login",
+                json={"carrier": "geico", "username": "b", "password": "pw"},
+            )
+            assert rb.status_code == 423
+            body = rb.json()
+            assert body["detail"] == "carrier-busy"
+            assert body["boring_url"] == "/api/cache"
+            assert "demo_uid" in browser_b.cookies
+
+            # Second browser CAN take a different carrier.
+            rb2 = await browser_b.post(
+                "/api/login",
+                json={"carrier": "mercury", "username": "b", "password": "pw"},
+            )
+            assert rb2.status_code == 200
+
+            # Drain SSE so the slots release cleanly before fixture teardown.
+            await _collect_states(browser_a, sid_a, timeout=1.0)
+
+
+async def test_same_uid_reload_returns_existing_session(
+    fake_playwright, mock_carrier, tmp_session_dir
+):
+    """Reloading the page (same cookie, same carrier) returns the in-flight
+    session rather than minting a new one."""
+    transport = httpx.ASGITransport(app=app)
+    async with app.router.lifespan_context(app):
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://test"
+        ) as browser:
+            r1 = await browser.post(
+                "/api/login",
+                json={"carrier": "geico", "username": "x", "password": "pw"},
+            )
+            sid1 = r1.json()["session_id"]
+
+            r2 = await browser.post(
+                "/api/login",
+                json={"carrier": "geico", "username": "x", "password": "pw"},
+            )
+            assert r2.json()["session_id"] == sid1
+
+            await _collect_states(browser, sid1, timeout=1.0)
+
+
+async def test_cache_endpoint_is_per_uid(
+    fake_playwright, mock_carrier, tmp_session_dir
+):
+    """After browser A completes a flow, only browser A sees those docs at
+    /api/cache. Browser B sees its own (empty) cache."""
+    transport = httpx.ASGITransport(app=app)
+    async with app.router.lifespan_context(app):
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://test"
+        ) as browser_a, httpx.AsyncClient(
+            transport=transport, base_url="http://test"
+        ) as browser_b:
+            sid = (
+                await browser_a.post(
+                    "/api/login",
+                    json={
+                        "carrier": "geico",
+                        "username": "cache@x",
+                        "password": "pw",
+                    },
+                )
+            ).json()["session_id"]
+            collector = asyncio.create_task(_collect_states(browser_a, sid))
+            await asyncio.sleep(0.6)
+            await browser_a.post(f"/api/mfa/{sid}", json={"code": "1"})
+            await collector
+
+            cache_a = (await browser_a.get("/api/cache")).json()
+            assert any(
+                r["carrier"] == "geico" and r["docs"]
+                for r in cache_a["results"]
+            )
+
+            cache_b = (await browser_b.get("/api/cache")).json()
+            assert cache_b["results"] == []
+
+
 async def test_session_reuse_skips_mfa(client, tmp_session_dir):
     # First login — full flow with MFA
     sid1 = (

@@ -6,17 +6,18 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request, status
-from fastapi.responses import FileResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from sse_starlette.sse import EventSourceResponse
 
-from . import auto_repair
+from . import auto_repair, identity, result_store
 from .config import settings
 from .logging_config import configure_logging
 from .models import Carrier, LoginRequest, LoginResponse, MfaRequest, SessionState
 from .orchestrator import execute_login
 from .playwright_runner import runner
 from .session_manager import SessionNotFoundError, manager
+from .slot_manager import ClaimResult, slot_manager
 from .worker_proxy import worker_proxy
 
 configure_logging()
@@ -46,12 +47,54 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="Infer Take-Home: Carrier Document Puller", lifespan=lifespan)
 
 
-@app.post("/api/login", response_model=LoginResponse)
-async def login(req: LoginRequest) -> LoginResponse:
-    if worker_proxy.enabled_for(req.carrier):
-        return await worker_proxy.login(req)
+@app.post("/api/login")
+async def login(req: LoginRequest, request: Request) -> Response:
+    uid, is_new_uid = _resolve_uid(request)
 
-    session = manager.create(req.carrier, req.username)
+    if worker_proxy.enabled_for(req.carrier):
+        proxied = await worker_proxy.login(req)
+        # Best-effort: track the worker-proxied session under this uid's slot
+        # so the SSE heartbeat can release it on disconnect.
+        slot_manager.claim(uid, req.carrier, proxied.session_id)
+        return _json(
+            {"session_id": proxied.session_id}, request, uid, is_new_uid
+        )
+
+    existing_slot = slot_manager.get(uid)
+    if existing_slot and existing_slot.carrier == req.carrier:
+        try:
+            existing = manager.get(existing_slot.session_id)
+        except SessionNotFoundError:
+            existing = None
+        if existing and existing.state not in (
+            SessionState.DONE,
+            SessionState.ERROR,
+        ):
+            slot_manager.tick(uid)
+            return _json(
+                {"session_id": existing.id}, request, uid, is_new_uid
+            )
+
+    # Claim the slot BEFORE minting the Session, so a CARRIER_BUSY rejection
+    # doesn't leave a phantom session lying around.
+    outcome = slot_manager.claim(uid, req.carrier, "")
+    if outcome.result is ClaimResult.CARRIER_BUSY:
+        return _json(
+            {
+                "detail": "carrier-busy",
+                "carrier": req.carrier.value,
+                "boring_url": "/api/cache",
+            },
+            request,
+            uid,
+            is_new_uid,
+            status_code=423,
+        )
+
+    session = manager.create(req.carrier, req.username, uid=uid)
+    # Update the slot to point at the real session id now that we have one.
+    slot_manager.claim(uid, req.carrier, session.id)
+
     task = asyncio.create_task(
         execute_login(
             manager,
@@ -62,7 +105,29 @@ async def login(req: LoginRequest) -> LoginResponse:
         )
     )
     manager.attach_task(session.id, task)
-    return LoginResponse(session_id=session.id)
+    return _json({"session_id": session.id}, request, uid, is_new_uid)
+
+
+def _resolve_uid(request: Request) -> tuple[str, bool]:
+    """Return (uid, is_new). New uids need their cookie stamped on the response."""
+    existing = identity.get_uid(request)
+    if existing:
+        return existing, False
+    return identity.mint_uid(), True
+
+
+def _json(
+    content: dict,
+    request: Request,
+    uid: str,
+    is_new_uid: bool,
+    *,
+    status_code: int = 200,
+) -> JSONResponse:
+    resp = JSONResponse(content=content, status_code=status_code)
+    if is_new_uid:
+        identity.set_uid_cookie(resp, uid, request)
+    return resp
 
 
 @app.get("/api/status/{session_id}")
@@ -82,6 +147,8 @@ async def status_stream(session_id: str, request: Request) -> EventSourceRespons
 
         return EventSourceResponse(persisted_event_gen())
 
+    uid = identity.get_uid(request)
+
     async def event_gen():
         try:
             while True:
@@ -90,13 +157,36 @@ async def status_stream(session_id: str, request: Request) -> EventSourceRespons
                 try:
                     evt = await asyncio.wait_for(queue.get(), timeout=15.0)
                 except asyncio.TimeoutError:
+                    if uid:
+                        slot_manager.tick(uid)
                     yield {"event": "heartbeat", "data": "ping"}
                     continue
+                if uid:
+                    slot_manager.tick(uid)
                 yield {"event": evt.event, "data": evt.model_dump_json()}
-                if evt.state in (SessionState.DONE, SessionState.ERROR):
+                if evt.event == "repair_done":
                     break
+                if evt.state == SessionState.DONE:
+                    break
+                if evt.state == SessionState.ERROR:
+                    # Keep the stream open only if a repair was actually
+                    # kicked for this specific session — otherwise (auto-repair
+                    # disabled, or per-carrier dedup folded our failure) the
+                    # client would block forever waiting for repair_done events
+                    # that won't arrive.
+                    try:
+                        session = manager.get(session_id)
+                        if not session.repair_kicked:
+                            break
+                    except SessionNotFoundError:
+                        break
         finally:
             manager.unsubscribe(session_id, queue)
+            # Always release: tab closed, flow finished, or repair done.
+            # Reload re-claims via cookie+/api/login if the same uid still
+            # wants the same carrier.
+            if uid:
+                slot_manager.release(uid)
 
     return EventSourceResponse(event_gen())
 
@@ -155,6 +245,34 @@ async def dev_credentials(request: Request) -> dict:
             "password": settings.mercury_password,
         }
     return {"credentials": creds}
+
+
+@app.get("/api/cache")
+async def cache_endpoint(request: Request) -> Response:
+    """Per-uid cached results. Used as the boring path when a carrier is busy.
+
+    Privacy: each browser (uid cookie) only ever sees its own past runs."""
+    uid, is_new_uid = _resolve_uid(request)
+    if not settings.persist_completed_results:
+        return _json({"uid_known": True, "results": []}, request, uid, is_new_uid)
+    entries = result_store.latest_for_uid(uid)
+    enriched = []
+    for entry in entries:
+        status_event = result_store.load_status(entry["session_id"])
+        if status_event is None or status_event.docs is None:
+            continue
+        enriched.append(
+            {
+                "carrier": entry["carrier"],
+                "session_id": entry["session_id"],
+                "saved_at": entry["saved_at"],
+                "docs": [doc.model_dump(mode="json") for doc in status_event.docs],
+                "timings_ms": status_event.timings_ms,
+            }
+        )
+    return _json(
+        {"uid_known": True, "results": enriched}, request, uid, is_new_uid
+    )
 
 
 @app.get("/api/docs/{session_id}/{doc_id}")

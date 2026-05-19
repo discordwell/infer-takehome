@@ -48,6 +48,15 @@
       <p class="hint">Status: <code id="waiting-state">—</code></p>
     </section>
 
+    <!-- BORING (carrier busy) STATE -->
+    <section id="state-boring" class="state hidden">
+      <h2>Carrier in use by another session</h2>
+      <p id="boring-detail">Someone else is currently driving this carrier. While you wait, here's what's cached for your browser.</p>
+      <div id="boring-cache-empty" class="hint hidden">Nothing cached for this browser yet. Try a different carrier, or wait a minute and retry.</div>
+      <ul id="boring-cache-list"></ul>
+      <button id="boring-retry-btn" type="button">Try again</button>
+    </section>
+
     <!-- MFA STATE -->
     <section id="state-mfa" class="state hidden">
       <h2>2. Enter your verification code</h2>
@@ -75,6 +84,21 @@
       <h2>Something went wrong</h2>
       <p id="error-msg"></p>
       <button id="error-restart-btn" type="button">Start over</button>
+    </section>
+
+    <!-- REPAIR PANEL (overlays waiting/error while Claude debugs the carrier) -->
+    <section id="repair-panel" class="state repair-panel hidden">
+      <h2>
+        <span class="spinner"></span>
+        Auto-repair running &mdash;
+        <span id="repair-status-label">Claude is debugging</span>
+      </h2>
+      <p id="repair-summary" class="hint">Claude inspects the carrier site, edits the failing adapter, and reports back. This log is live.</p>
+      <details open>
+        <summary>Live Claude output</summary>
+        <ol id="repair-log"></ol>
+      </details>
+      <div id="repair-verdict" class="hidden"></div>
     </section>
   </main>
 
