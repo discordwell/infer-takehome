@@ -10,6 +10,7 @@ storage/sessions/
 storage/browser-profiles/
 storage/manual-traces/
 storage/backups/
+storage/debug/
 storage/*.json
 !storage/sessions/.gitkeep
 

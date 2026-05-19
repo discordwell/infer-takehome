@@ -2,6 +2,7 @@ from backend.carriers.generic_portal import (
     GenericPortalFlow,
     MercuryFlow,
     MERCURY_SPEC,
+    ProgressiveFlow,
     PROGRESSIVE_SPEC,
 )
 from backend.carriers.registry import supported_carriers
@@ -43,6 +44,14 @@ def test_experimental_carriers_are_registered():
 def test_progressive_spec_has_login_and_document_urls():
     assert PROGRESSIVE_SPEC.login_url.startswith("https://")
     assert PROGRESSIVE_SPEC.document_urls
+
+
+def test_progressive_otp_selector_covers_angular_mfa_field():
+    selector = ProgressiveFlow._otp_selector()
+
+    assert "formcontrolname='otp'" in selector
+    assert "data-pgr-id='inputOtp'" in selector
+    assert "maxlength='6'" in selector
 
 
 def test_mercury_spec_points_at_customer_portal():

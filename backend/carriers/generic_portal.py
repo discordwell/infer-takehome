@@ -17,7 +17,8 @@ from .base import CarrierFlow
 
 log = logging.getLogger(__name__)
 
-DEBUG_DIR = Path("/tmp")
+PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+DEBUG_DIR = PROJECT_ROOT / "storage" / "debug"
 MERCURY_MAX_DECLARATION_PDF_BYTES = 750_000
 
 
@@ -142,6 +143,7 @@ class GenericPortalFlow(CarrierFlow):
                         "button",
                         name=re.compile(r"continue|submit|verify|next", re.I),
                     ).first,
+                    page.locator("[data-pgr-id='buttonOtpFormSubmit']:visible").first,
                     page.locator("button[type='submit']:visible").first,
                     page.locator("input[type='submit']:visible").first,
                 )
@@ -590,21 +592,68 @@ class GenericPortalFlow(CarrierFlow):
         safe_label = re.sub(r"[^a-z0-9-]+", "-", self.spec.carrier.value.lower())
         png = DEBUG_DIR / f"{safe_label}-{label}.png"
         html = DEBUG_DIR / f"{safe_label}-{label}.html"
+        meta = DEBUG_DIR / f"{safe_label}-{label}.json"
+        try:
+            DEBUG_DIR.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
         try:
             await page.screenshot(path=str(png), full_page=True, timeout=5000)
         except Exception:
             pass
         try:
-            html.write_text(await page.content())
+            html.write_text(await page.content(), encoding="utf-8")
         except Exception:
             pass
-        log.info("%s debug dump -> %s, %s", self.spec.label, png, html)
+        try:
+            metadata = await page.evaluate(
+                """() => {
+                    const clip = (value, limit = 220) =>
+                        String(value || "").replace(/\\s+/g, " ").trim().slice(0, limit);
+                    const attr = (el, name) => el.getAttribute(name);
+                    const controls = Array.from(
+                        document.querySelectorAll("input, button, [role='button'], a")
+                    ).slice(0, 140).map((el) => ({
+                        tag: el.tagName.toLowerCase(),
+                        type: attr(el, "type"),
+                        name: attr(el, "name"),
+                        id: attr(el, "id"),
+                        autocomplete: attr(el, "autocomplete"),
+                        inputmode: attr(el, "inputmode"),
+                        formcontrolname: attr(el, "formcontrolname"),
+                        placeholder: attr(el, "placeholder"),
+                        dataPgrId: attr(el, "data-pgr-id"),
+                        ariaLabel: attr(el, "aria-label"),
+                        role: attr(el, "role"),
+                        text: clip(el.innerText || el.textContent),
+                        visible: Boolean(
+                            el.offsetWidth || el.offsetHeight || el.getClientRects().length
+                        ),
+                        disabled: Boolean(el.disabled || attr(el, "disabled")),
+                        ariaDisabled: attr(el, "aria-disabled"),
+                    }));
+                    return {
+                        url: location.href,
+                        title: document.title,
+                        bodySample: clip(document.body && document.body.innerText, 2000),
+                        controls,
+                    };
+                }"""
+            )
+            meta.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
+        except Exception:
+            pass
+        log.info("%s debug dump -> %s, %s, %s", self.spec.label, png, html, meta)
 
     @staticmethod
     def _otp_selector() -> str:
         return (
             "input[autocomplete='one-time-code']:visible, "
-            "input[inputmode='numeric']:visible"
+            "input[inputmode='numeric']:visible, "
+            "input[formcontrolname='otp' i]:visible, "
+            "input[data-pgr-id='inputOtp']:visible, "
+            "input[placeholder='XXXXXX']:visible, "
+            "input[maxlength='6']:visible"
         )
 
     @staticmethod
@@ -714,6 +763,49 @@ MERCURY_SPEC = GenericPortalSpec(
 class ProgressiveFlow(GenericPortalFlow):
     def __init__(self) -> None:
         super().__init__(PROGRESSIVE_SPEC)
+
+    async def mfa_required(self, page: Page) -> bool:
+        await self._select_contact_method_if_needed(page)
+        return await super().mfa_required(page)
+
+    async def _select_contact_method_if_needed(self, page: Page) -> None:
+        url = page.url.lower()
+        contact_method = page.locator(
+            "input[name='contactMethod'], "
+            "input[formcontrolname='contactMethod' i], "
+            "[data-pgr-id='puiRadioMediumEmailMe'], "
+            "[data-pgr-id='puiRadioMediumTextMe']"
+        )
+        if "select-contact-method" not in url and await contact_method.count() == 0:
+            return
+        if await page.locator(self._otp_selector()).count() > 0:
+            return
+
+        log.info("Progressive: selecting MFA contact method at %s", page.url)
+        try:
+            choice = await self._first_present(
+                page.locator("[data-pgr-id='puiRadioMediumEmailMe']:visible").first,
+                page.locator("[data-pgr-id='puiRadioMediumTextMe']:visible").first,
+                page.locator("input[name='contactMethod']:visible").first,
+                page.locator("input[formcontrolname='contactMethod' i]:visible").first,
+                timeout_ms=3000,
+            )
+            await choice.click(timeout=5000)
+            submit = await self._first_present(
+                page.locator(
+                    "[data-pgr-id='buttonContactMethodSelectionFormSubmit']:visible"
+                ).first,
+                page.get_by_role(
+                    "button", name=re.compile(r"continue|send|next", re.I)
+                ).first,
+                page.locator("button[type='submit']:visible").first,
+                timeout_ms=3000,
+            )
+            await submit.click(timeout=5000)
+            await page.wait_for_selector(self._otp_selector(), timeout=10000)
+        except Exception as e:
+            await self._dump_debug(page, "mfa-contact-method-failure")
+            log.warning("Progressive: MFA contact method selection failed: %s", e)
 
 
 class StateFarmFlow(GenericPortalFlow):
