@@ -73,4 +73,9 @@ RUN git init -q \
 
 EXPOSE 8000
 
-CMD ["uv", "run", "uvicorn", "backend.main:app", "--host", "0.0.0.0", "--port", "8000"]
+# Apply any verified auto-repair patches from the storage volume BEFORE
+# uvicorn imports the carrier modules — otherwise the patched code on disk
+# wouldn't be live in the running process. ``|| true`` so a single broken
+# patch can't block boot. ``exec`` so SIGTERM from docker stop reaches
+# uvicorn instead of being trapped by the shell.
+CMD ["sh", "-c", "uv run python -m backend.auto_repair_patches apply || true; exec uv run uvicorn backend.main:app --host 0.0.0.0 --port 8000"]

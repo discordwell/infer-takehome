@@ -168,6 +168,31 @@ the human should do.
 
 When STATUS is written, your turn ends.
 
+## What happens after STATUS: DONE
+
+The controller will:
+
+1. **Verify your fix.** Replay the carrier's `fetch_documents` against the
+   saved storage_state. If it still fails, your STATUS gets renamed to
+   `STATUS_REJECTED_turn<ts>`, `context.json` gains a `verification_failures`
+   entry with the reason, and you'll be resumed via `--resume` on the next
+   cadence tick to try again.
+2. **Persist your patch on the named volume.** Your full working-tree diff
+   is saved under `storage/patches/<ts>__<carrier>__<session>.patch`. At
+   container restart, before uvicorn boots, the patch reapplies so the
+   running process keeps your fix even though the shipped image still
+   carries the broken code.
+3. **Push to GitHub.** The same diff is force-pushed to
+   `auto-repair/<session_id>` on `discordwell/infer-takehome` via a
+   fine-grained PAT (read from `storage/secrets/github_pat`). The human
+   reviews that branch and cherry-picks into main on their own schedule.
+
+This means: your patch lives in three places once you've reached verified
+DONE — the running container, the named volume, and the GitHub branch.
+You don't need to do anything special for any of these to happen; just
+make sure the working-tree diff reflects exactly the change you want
+shipped (don't leave stray scratch files lying around in tracked paths).
+
 ## Cadence
 
 If you are not DONE this turn, you will be **resumed every 5 minutes** with a

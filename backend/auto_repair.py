@@ -28,7 +28,7 @@ import time
 from pathlib import Path
 from typing import Awaitable, Callable
 
-from . import repair_browser, storage
+from . import auto_repair_patches, repair_browser, storage
 
 log = logging.getLogger(__name__)
 
@@ -704,6 +704,76 @@ async def _verify_fix(
         return False, f"fetch_documents raised {type(e).__name__}: {e}"
 
 
+async def _persist_and_push_patch(
+    session_id: str, carrier: str, status_body: str
+) -> None:
+    """Capture the verified patch as a full working-tree diff, persist it
+    under storage/patches/ for restart-reapply, then force-push it to the
+    ``auto-repair/<session_id>`` branch on GitHub.
+
+    Best-effort: any failure here is logged but doesn't undo the verifier's
+    accept — the in-container code is already running with the fix.
+    """
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "git", "-C", "/app", "diff", "HEAD",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=30.0)
+    except Exception as e:  # noqa: BLE001
+        log.warning(
+            "persist-and-push: capturing diff failed carrier=%s session=%s: %s",
+            carrier, session_id, e,
+        )
+        return
+    patch_content = stdout.decode("utf-8", "replace")
+    if not patch_content.strip():
+        log.warning(
+            "persist-and-push: empty diff carrier=%s session=%s "
+            "(verifier accepted but working tree is clean — skipping)",
+            carrier, session_id,
+        )
+        return
+
+    summary = (status_body or "").strip()[:4000]
+    try:
+        path = auto_repair_patches.record(
+            session_id, carrier, patch_content, summary
+        )
+        log.info(
+            "persist-and-push: patch recorded carrier=%s session=%s path=%s",
+            carrier, session_id, path,
+        )
+    except Exception as e:  # noqa: BLE001
+        log.warning(
+            "persist-and-push: record() raised carrier=%s session=%s: %s",
+            carrier, session_id, e,
+        )
+
+    try:
+        ok, msg = await auto_repair_patches.push_to_branch(
+            session_id, carrier, patch_content, summary
+        )
+        if ok:
+            log.info(
+                "persist-and-push: branch published carrier=%s session=%s "
+                "branch=%s",
+                carrier, session_id, msg,
+            )
+        else:
+            log.warning(
+                "persist-and-push: GitHub push failed carrier=%s session=%s "
+                "reason=%s",
+                carrier, session_id, msg,
+            )
+    except Exception as e:  # noqa: BLE001
+        log.warning(
+            "persist-and-push: push_to_branch raised carrier=%s session=%s: %s",
+            carrier, session_id, e,
+        )
+
+
 async def _on_verification_failed(
     session_id: str, carrier: str, reason: str, rejected_status_body: str
 ) -> None:
@@ -780,6 +850,7 @@ async def _check_done(session_id: str, carrier: str) -> bool:
         if not passed:
             await _on_verification_failed(session_id, carrier, reason or "?", body)
             return False  # keep the session active; cadence will resume claude
+        await _persist_and_push_patch(session_id, carrier, body)
 
     # Ship any PDFs claude downloaded into delivered/ to the user's session
     # BEFORE we tear down the carrier slot. Per the user's spec: poll on
