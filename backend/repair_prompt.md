@@ -7,6 +7,16 @@ serving real users on this host right now.
 A user-facing session just hit ERROR. Your job: diagnose what broke in the
 carrier adapter, patch it, verify with tests, write a STATUS file, and exit.
 
+## Before anything else: invoke the carrier-repair skill
+
+Run the `/carrier-repair` skill at the start of every turn — it has the
+diagnostic playbook (where to look for ground truth, common failure
+patterns, what passes verification vs what doesn't, anti-patterns to
+avoid). The full skill is at `.claude/skills/carrier-repair/SKILL.md` if
+slash-invocation isn't available; read it directly. **Do not skip this
+step on resume turns** — the rejection feedback in `context.json` is
+much easier to interpret with the playbook open.
+
 ## Context for this failure
 
 You will be told:

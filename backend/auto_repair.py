@@ -712,19 +712,70 @@ async def _verify_fix(
     # land on a login page; the verify path navigates via fetch_documents.
     ctx_opts.pop("_initial_url", None)
 
-    try:
-        async with pw_runner.new_context(
-            storage_state=storage_state, **ctx_opts
-        ) as ctx:
-            page = await ctx.new_page()
+    # Prefer attaching to the live repair browser via CDP when available.
+    # USAA's Akamai + OAuth gate (and similar carrier defenses) rejects
+    # fresh-chrome cold starts even when given the saved cookies, because
+    # the bot-management stack tracks more state than cookies alone (TLS
+    # fingerprint, accumulated cache, JS challenge history). The live
+    # repair browser has accumulated that state across the orchestrator's
+    # quick-path + claude's probes; reusing it is the only way the verify
+    # replay can pass on those carriers.
+    cdp_endpoint: str | None = None
+    cdp_file = out_dir / "cdp_endpoint.txt"
+    if cdp_file.exists():
+        try:
+            cdp_endpoint = cdp_file.read_text().strip() or None
+        except OSError:
+            cdp_endpoint = None
+
+    async def _run_replay(ctx) -> tuple[list, dict] | None:
+        page = await ctx.new_page()
+        try:
             http = await http_from_context(ctx)
             try:
-                docs, _doc_bytes = await asyncio.wait_for(
+                return await asyncio.wait_for(
                     flow.fetch_documents(page, http, ctx),
                     timeout=VERIFY_TIMEOUT_SECONDS,
                 )
             finally:
                 await http.aclose()
+        finally:
+            try:
+                await page.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+    try:
+        docs: list = []
+        if cdp_endpoint:
+            from playwright.async_api import async_playwright
+
+            log.info(
+                "verify: attaching to live repair browser carrier=%s "
+                "session=%s endpoint=%s",
+                carrier, session_id, cdp_endpoint,
+            )
+            async with async_playwright() as pw:
+                browser = await asyncio.wait_for(
+                    pw.chromium.connect_over_cdp(cdp_endpoint),
+                    timeout=10.0,
+                )
+                try:
+                    if not browser.contexts:
+                        return False, "CDP browser has no context"
+                    ctx = browser.contexts[0]
+                    result = await _run_replay(ctx)
+                    docs, _doc_bytes = result if result else ([], {})
+                finally:
+                    # Disconnects the CDP handle without terminating the
+                    # chromium process (which belongs to repair_browser).
+                    await browser.close()
+        else:
+            async with pw_runner.new_context(
+                storage_state=storage_state, **ctx_opts
+            ) as ctx:
+                result = await _run_replay(ctx)
+                docs, _doc_bytes = result if result else ([], {})
         if not docs:
             return False, "fetch_documents returned 0 documents"
         log.info(
