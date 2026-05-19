@@ -666,6 +666,32 @@ async def _verify_fix(
             "no auth_state.json on disk — cannot replay carrier flow to "
             "verify the fix",
         )
+    # Reload the carrier module + registry so the verifier picks up claude's
+    # on-disk patches. Without this, sys.modules caches the UsaaFlow class
+    # from FastAPI boot and the replay runs against the broken code that
+    # triggered this repair (claude turn 3 of session 2a208776 diagnosed
+    # this exact bug — "verifier replays in-process and Python's module
+    # cache keeps the OLD UsaaFlow loaded").
+    try:
+        import importlib
+        import sys as _sys
+        carrier_mod_name = f"backend.carriers.{carrier}"
+        if carrier_mod_name in _sys.modules:
+            importlib.reload(_sys.modules[carrier_mod_name])
+        if "backend.carriers.registry" in _sys.modules:
+            importlib.reload(_sys.modules["backend.carriers.registry"])
+        log.info(
+            "verify: reloaded carrier module + registry for fresh class "
+            "instances carrier=%s session=%s",
+            carrier, session_id,
+        )
+    except Exception as e:  # noqa: BLE001
+        log.warning(
+            "verify: module reload failed (continuing with cached classes) "
+            "carrier=%s err=%s",
+            carrier, e,
+        )
+
     try:
         from .carriers.registry import get_flow
         from .models import Carrier
