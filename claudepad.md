@@ -2,6 +2,69 @@
 
 ## Session Summaries
 
+### 2026-05-19 16:10Z — Auto-repair end-to-end happy path proven on GitHub
+
+Session `3f12c5d996ca4e70a3b87a3deeb9c3a8` produced the first
+auto-repair branch from a verified-DONE fix:
+`auto-repair/3f12c5d996ca4e70a3b87a3deeb9c3a8` at commit `0b4b6977`,
+a 6-line viewDocument-→readDocument- selector fix authored by the
+in-container claude, signed by `auto-repair bot
+<auto-repair@infer.local>`, body containing the full skill-driven
+diagnosis.
+
+Got there by chaining four fixes today:
+
+1. **Verifier Chrome-CDP context_options** (commit `5b3c97d`) —
+   `_verify_fix` was using plain headless Playwright; USAA's Akamai
+   blocked it with ERR_HTTP2_PROTOCOL_ERROR. Now reads username
+   from context.json, calls `flow.context_options_for_username()`,
+   uses a dedicated `storage/browser-profiles/verify/<carrier>-<sid>`
+   profile dir.
+
+2. **Verifier CDP-attach to live repair browser** (commit `8a6f95c`)
+   — fresh chromium with new profile dir can't survive USAA's
+   OAuth gate even with valid cookies; the live repair browser
+   (warm, multi-hour CDP) can. `_verify_fix` now prefers attaching
+   to `cdp_endpoint.txt` when present, falls back to fresh-launch
+   when not.
+
+3. **carrier-repair skill** (commit `8a6f95c`) — `.claude/skills/
+   carrier-repair/SKILL.md` with the diagnostic playbook (step 1
+   ground-truth-gathering, step 2 sanity-check, step 3 fresh-Chrome
+   OAuth-gate repro, step 4 DONE-criteria, anti-patterns). The
+   in-container claude turn 1 dropped from ~9-26 min to ~5 min and
+   stopped speculating about extra selector patterns.
+
+4. **Verifier importlib.reload** (commit `61c9a7f`) — _verify_fix
+   replays in the same Python process that imported
+   `backend.carriers.<carrier>` at FastAPI boot, so sys.modules
+   held the OLD UsaaFlow class even after claude patched the file
+   on disk. Now reloads the carrier module + registry before
+   `get_flow()`. Surfaced by in-container claude turn 3 of session
+   `2a208776` — that turn nailed the bug exactly.
+
+5. **`git apply` not `--3way`** (commit `1d8c4e0`) — the side-clone
+   for the GitHub push lacks the image-baseline blob the patch
+   references; plain apply works as long as main matches the
+   image's working-tree state at deploy time.
+
+The demo also required the deliberate `viewDocument-` break to be
+on main during the test (commit `36538b3`, reverted by `e061579`).
+Without it the push step correctly declines a no-op branch against
+main — a safety feature, not a bug.
+
+USAA session lifetime turned out to be ~60-70 min — cookies
+refreshed via `run_usaa_once` need to be synced to prod and a test
+kicked within minutes for the verifier's live-CDP replay to still
+have a valid USAA session. The Chrome MCP browser at
+cordwell@gmail.com works to grab MFA codes (Gemini's AI overview
+even spells out "USAA one-time security code is XXXXXX" in plain
+text).
+
+Prod reverted to clean main, container redeployed at `e061579`.
+The `auto-repair/3f12c5d996ca4e70a3b87a3deeb9c3a8` branch is left
+on GitHub as visible proof of the working chain.
+
 ### 2026-05-19 06:45Z — Auto-repair pickup mechanism + verifier Chrome-CDP fix
 
 Closed the "DONE-but-never-landed" gap that prior session
