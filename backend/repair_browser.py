@@ -26,6 +26,7 @@ from pathlib import Path
 
 from playwright.async_api import async_playwright
 
+from . import storage
 from .playwright_runner import _chrome_binary
 
 log = logging.getLogger(__name__)
@@ -40,6 +41,7 @@ class RepairBrowser:
     cdp_endpoint: str
     started_at: float
     headed: bool
+    username: str | None = None
 
 
 _repair_browsers: dict[str, RepairBrowser] = {}
@@ -93,6 +95,8 @@ async def spawn(
     storage_state: dict,
     initial_url: str | None = None,
     headed: bool = False,
+    *,
+    username: str | None = None,
 ) -> str:
     """Spawn a repair chromium with cookies pre-loaded.
 
@@ -211,6 +215,7 @@ async def spawn(
             cdp_endpoint=cdp_endpoint,
             started_at=time.time(),
             headed=headed,
+            username=username,
         )
         async with _lock:
             _repair_browsers[carrier] = rb
@@ -242,7 +247,53 @@ async def cleanup(carrier: str) -> None:
         was_alive,
         time.time() - rb.started_at,
     )
+    if was_alive and rb.username:
+        await _harvest_storage_state(rb)
     _terminate(rb.proc)
+
+
+async def _harvest_storage_state(rb: RepairBrowser) -> None:
+    """Best-effort: pull the latest storage_state from the live repair
+    browser and persist it. After a successful repair the cookies are likely
+    longer-lived than the ones the user originally had, so future quick-path
+    runs skip MFA."""
+    try:
+        async with async_playwright() as pw:
+            browser = await asyncio.wait_for(
+                pw.chromium.connect_over_cdp(rb.cdp_endpoint),
+                timeout=8.0,
+            )
+            try:
+                if not browser.contexts:
+                    return
+                ctx = browser.contexts[0]
+                fresh_state = await asyncio.wait_for(
+                    ctx.storage_state(), timeout=8.0
+                )
+            finally:
+                await browser.close()
+        cookies = fresh_state.get("cookies") or []
+        if not cookies:
+            log.info(
+                "harvest: empty storage_state from repair browser "
+                "carrier=%s — skipping save",
+                rb.carrier,
+            )
+            return
+        storage.save(rb.carrier, rb.username, fresh_state)
+        log.info(
+            "harvest: refreshed storage_state carrier=%s session=%s cookies=%d",
+            rb.carrier, rb.session_id, len(cookies),
+        )
+    except asyncio.TimeoutError:
+        log.warning(
+            "harvest: storage_state capture timed out carrier=%s", rb.carrier
+        )
+    except Exception as e:  # noqa: BLE001
+        log.warning(
+            "harvest: storage_state capture failed carrier=%s: %s",
+            rb.carrier, e,
+        )
 
 
 async def cleanup_all() -> None:

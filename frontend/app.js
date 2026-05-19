@@ -15,6 +15,9 @@
   let mfaStartTs = null;
   let devCredentials = {};
   let lastAttemptedCarrier = null;
+  let feedbackRecoveryActive = false;
+  let currentDocs = []; // most recent rendered docs
+  let rejectedDocIds = new Set(); // ids the user explicitly rejected — skip replays of these
 
   function show(name) {
     for (const s of STATES) {
@@ -42,18 +45,29 @@
     verdict.textContent = "";
     document.getElementById("repair-status-label").textContent =
       "Claude is debugging";
+    document.getElementById("email-notify").classList.add("hidden");
+    document.getElementById("email-feedback").textContent = "";
+    document.getElementById("email-feedback").className = "hint";
+    const emailForm = document.getElementById("email-form");
+    if (emailForm) emailForm.reset();
   }
 
   function resetUI() {
     if (eventSource) { eventSource.close(); eventSource = null; }
     sessionId = null;
     mfaStartTs = null;
+    feedbackRecoveryActive = false;
+    currentDocs = [];
+    rejectedDocIds = new Set();
     document.getElementById("login-form").reset();
     applyDevCredentials();
     document.getElementById("mfa-form").reset();
     document.getElementById("docs-list").innerHTML = "";
     document.getElementById("docs-summary").textContent = "";
     document.getElementById("docs-latency").textContent = "";
+    document.getElementById("previous-attempt").classList.add("hidden");
+    document.getElementById("previous-docs-list").innerHTML = "";
+    document.getElementById("feedback-bar").classList.add("hidden");
     clearRepairPanel();
     show("form");
   }
@@ -98,14 +112,30 @@
       if (state === "MFA_REQUIRED") {
         show("mfa");
       } else if (state === "AUTHENTICATING" || state === "FETCHING_DOCS" || state === "LOGGING_IN") {
-        show("waiting");
+        // During feedback recovery we may still be on the docs view; only
+        // switch to waiting if we don't have docs to show.
+        if (!feedbackRecoveryActive) show("waiting");
       } else if (docs && docs.length) {
+        // While in feedback recovery, the SSE snapshot keeps re-delivering
+        // the originally-rejected docs. Ignore those — we only want NEW
+        // docs that arrived via repair_deliver.
+        if (
+          feedbackRecoveryActive &&
+          rejectedDocIds.size &&
+          docs.every((d) => rejectedDocIds.has(d.id))
+        ) {
+          return;
+        }
+        if (feedbackRecoveryActive && currentDocs.length) {
+          stashPreviousAttempt(currentDocs);
+        }
         renderDocs(docs, timings_ms || null, state === "DONE");
-        if (state === "DONE" && eventSource) { eventSource.close(); eventSource = null; }
+        if (state === "DONE" && !feedbackRecoveryActive && eventSource) {
+          eventSource.close();
+          eventSource = null;
+        }
       } else if (state === "ERROR") {
         showError(error || "Server error");
-        // Don't close the EventSource immediately — auto-repair may stream
-        // repair_log events into the same stream.
       }
     };
 
@@ -120,8 +150,7 @@
 
   function appendRepairChunk(chunk) {
     if (!chunk) return;
-    const panel = document.getElementById("repair-panel");
-    panel.classList.remove("hidden");
+    showRepairPanel();
     const list = document.getElementById("repair-log");
     const li = document.createElement("li");
     li.classList.add(`chunk-${chunk.kind || "text"}`);
@@ -134,6 +163,12 @@
     li.appendChild(body);
     list.appendChild(li);
     list.scrollTop = list.scrollHeight;
+  }
+
+  function showRepairPanel() {
+    document.getElementById("repair-panel").classList.remove("hidden");
+    // Email-notify panel becomes available as soon as repair is active.
+    document.getElementById("email-notify").classList.remove("hidden");
   }
 
   function renderChunkText(chunk) {
@@ -151,8 +186,7 @@
 
   function showRepairVerdict(chunk) {
     if (!chunk) return;
-    const panel = document.getElementById("repair-panel");
-    panel.classList.remove("hidden");
+    showRepairPanel();
     const verdict = document.getElementById("repair-verdict");
     const label = document.getElementById("repair-status-label");
     const cls = (chunk.verdict || "").toLowerCase() === "done" ? "done" : "need_human";
@@ -161,12 +195,17 @@
     verdict.textContent = chunk.first_line || `Verdict: ${chunk.verdict}`;
     label.textContent =
       cls === "done"
-        ? "Repair complete — retry your login when ready."
+        ? "Repair complete."
         : "Repair handed off — needs a human.";
-    if (eventSource) { eventSource.close(); eventSource = null; }
+    // Even after verdict, keep stream open briefly in case docs are still
+    // being delivered (claude may set STATUS before/after the deliver poll).
+    setTimeout(() => {
+      if (eventSource) { eventSource.close(); eventSource = null; }
+    }, 2000);
   }
 
   function renderDocs(docs, timingsMs, complete = true) {
+    currentDocs = docs;
     const list = document.getElementById("docs-list");
     list.innerHTML = "";
     document.getElementById("docs-summary").textContent =
@@ -180,6 +219,9 @@
     }
     if (timingsMs && timingsMs.docs_ready_publish != null) {
       timingParts.push(`${serverOrigin} → all documents ready: ${timingsMs.docs_ready_publish} ms`);
+    }
+    if (timingsMs && timingsMs.repair_delivered_ms != null) {
+      timingParts.push(`Claude delivered ${timingsMs.repair_doc_count || ""} docs in: ${timingsMs.repair_delivered_ms} ms`);
     }
     if (!complete && timingsMs && timingsMs.docs_progress_publish != null) {
       timingParts.push(`${serverOrigin} → first document visible: ${timingsMs.docs_progress_publish} ms`);
@@ -202,7 +244,29 @@
       `;
       list.appendChild(li);
     }
+    // Show feedback buttons once docs are visible — but only if not already
+    // mid-recovery. Recovery delivers replacement docs and re-enables.
+    const feedbackBar = document.getElementById("feedback-bar");
+    feedbackBar.classList.remove("hidden");
+    feedbackBar.querySelector("#feedback-bad-btn").disabled = false;
+    feedbackBar.querySelector("#feedback-ok-btn").disabled = false;
     show("docs");
+  }
+
+  function stashPreviousAttempt(docs) {
+    const expander = document.getElementById("previous-attempt");
+    const list = document.getElementById("previous-docs-list");
+    list.innerHTML = "";
+    for (const d of docs) {
+      const li = document.createElement("li");
+      const url = `/api/docs/${sessionId}/${d.id}`;
+      li.innerHTML = `
+        <a href="${url}" target="_blank">${escapeHtml(d.name)}</a>
+        <span class="doc-category">${(d.size_bytes / 1024).toFixed(1)} KB</span>
+      `;
+      list.appendChild(li);
+    }
+    expander.classList.remove("hidden");
   }
 
   function escapeHtml(s) {
@@ -286,6 +350,11 @@
     submitBtn.disabled = true;
     const data = Object.fromEntries(new FormData(e.target).entries());
     lastAttemptedCarrier = data.carrier;
+    feedbackRecoveryActive = false;
+    currentDocs = [];
+    rejectedDocIds = new Set();
+    document.getElementById("previous-attempt").classList.add("hidden");
+    document.getElementById("feedback-bar").classList.add("hidden");
     clearRepairPanel();
     show("waiting");
     setStatus("LOGGING_IN", "Submitting credentials");
@@ -319,6 +388,74 @@
       showError(err.message);
     } finally {
       submitBtn.disabled = false;
+    }
+  });
+
+  document.getElementById("feedback-ok-btn").addEventListener("click", async () => {
+    if (!sessionId) return;
+    const bar = document.getElementById("feedback-bar");
+    bar.querySelector("#feedback-ok-btn").disabled = true;
+    bar.querySelector("#feedback-bad-btn").disabled = true;
+    try {
+      await postJSON(`/api/feedback/${sessionId}`, { ok: true });
+      bar.innerHTML = '<p class="hint">Thanks — slot released.</p>';
+      if (eventSource) { eventSource.close(); eventSource = null; }
+    } catch (err) {
+      bar.querySelector("#feedback-ok-btn").disabled = false;
+      bar.querySelector("#feedback-bad-btn").disabled = false;
+      alert("Couldn't send feedback: " + err.message);
+    }
+  });
+
+  document.getElementById("feedback-bad-btn").addEventListener("click", async () => {
+    if (!sessionId) return;
+    const bar = document.getElementById("feedback-bar");
+    bar.querySelector("#feedback-ok-btn").disabled = true;
+    bar.querySelector("#feedback-bad-btn").disabled = true;
+    try {
+      const result = await postJSON(`/api/feedback/${sessionId}`, { ok: false });
+      feedbackRecoveryActive = true;
+      // Record which doc ids the user rejected so subsequent SSE replays
+      // of those same docs are ignored.
+      rejectedDocIds = new Set(currentDocs.map((d) => d.id));
+      // Pre-emptively move the current docs into the expander.
+      if (currentDocs.length) {
+        stashPreviousAttempt(currentDocs);
+        currentDocs = [];
+      }
+      document.getElementById("docs-list").innerHTML = "";
+      document.getElementById("docs-summary").textContent =
+        "Claude is searching for better documents…";
+      document.getElementById("docs-latency").textContent = "";
+      bar.innerHTML = `<p class="hint">Looking for better documents${result.kicked === false ? " (folded into an active repair)" : ""}…</p>`;
+      // Make sure the repair panel is visible (it will fill in once
+      // repair_log events start arriving).
+      showRepairPanel();
+      // Re-open the SSE if it was closed when DONE landed.
+      if (!eventSource && sessionId) listenForStatus(sessionId);
+    } catch (err) {
+      bar.querySelector("#feedback-ok-btn").disabled = false;
+      bar.querySelector("#feedback-bad-btn").disabled = false;
+      alert("Couldn't trigger recovery: " + err.message);
+    }
+  });
+
+  document.getElementById("email-form").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    if (!sessionId) return;
+    const input = document.getElementById("email-input");
+    const fb = document.getElementById("email-feedback");
+    fb.className = "hint";
+    fb.textContent = "Sending…";
+    try {
+      await postJSON(`/api/notify/${sessionId}`, { email: input.value });
+      fb.classList.add("success");
+      fb.textContent = `Got it — we'll email ${input.value} when this finishes.`;
+      input.disabled = true;
+      e.target.querySelector("button").disabled = true;
+    } catch (err) {
+      fb.classList.add("error");
+      fb.textContent = "Couldn't register email: " + err.message;
     }
   });
 

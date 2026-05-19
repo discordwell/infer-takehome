@@ -14,8 +14,39 @@ You will be told:
 - `SESSION_ID` — the session that failed
 - `CARRIER` — which carrier adapter (mercury, usaa, geico, progressive, etc.)
 
+## Before anything else: get the upstream story
+
+`context.json` only carries the *final* exception. The real failure is
+usually visible in two other places. **Always check these first**:
+
+1. **`storage/logs/app.log`** — the live prod log. Grep recent lines for
+   the carrier name and your `<SESSION_ID>` to see what the orchestrator
+   actually did, including upstream `WARNING` lines that are often the
+   real root cause. The exception in `context.json` may be a downstream
+   symptom thrown after the orchestrator already swallowed an earlier
+   warning.
+
+   ```bash
+   grep -nE "<CARRIER>|<SESSION_ID>" storage/logs/app.log | tail -200
+   tail -300 storage/logs/app.log
+   ```
+
+2. **`storage/debug/<CARRIER>/`** — debug DOM + screenshot dumps the
+   carrier adapter writes at failure time. For USAA: look for
+   `usaa-docs-no-links.html`, `usaa-docs-session-expired.html`, etc.
+   These are the **literal page state the broken code saw**, captured
+   at the moment of failure — more reliable than re-probing later (the
+   real page may have moved on, your cookies may have expired in the
+   meantime, etc.).
+
+   ```bash
+   ls -lat storage/debug/<CARRIER>/ 2>&1 | head -20
+   ```
+
+## Failure-session context
+
 The failed session has dropped context at `storage/repair/<SESSION_ID>/`.
-**Always start by listing that directory** to see what's actually available.
+**Always list that directory** to see what's actually available.
 Likely contents:
 
 - `context.json` — **always present.** Carrier, the orchestrator step that
@@ -88,12 +119,47 @@ patches, but you cannot probe the carrier site as the user.
 - Do **not** loop forever. After 3 edit attempts on the same failure without
   any new evidence, write `STATUS: NEED_HUMAN`.
 
+## Deliver real PDFs to the waiting user
+
+The user whose session triggered this repair is still on the page waiting
+for their documents. **If you can fetch their real PDFs during this turn —
+even before you've fully patched the adapter — drop them into
+`storage/repair/<SESSION_ID>/delivered/` and the controller will ship them
+to the user immediately.**
+
+Requirements:
+- Files must be real PDFs (start with `%PDF`).
+- One file per document. Use the human-friendly name as the filename
+  (e.g., `Declarations Page.pdf`, `Auto ID Card.pdf`). If you only get one
+  doc, ship that one.
+- Skip anything that's clearly not a real policy document (cover sheet,
+  brochure, login page screenshot, error page).
+
+After dropping PDFs in `delivered/`, you can still continue patching the
+adapter — the user receives the PDFs in parallel.
+
+## Feedback-recovery context
+
+If `context.json` has `"kick_reason": "user_rejected"`, the user
+*successfully* received documents but said they're not what they wanted. You'll
+also find a `prior_analysis` array describing what they got. Read it. Your
+job is to find better docs — often this means navigating to a different
+section of the carrier site (e.g., user got a brochure, needs the
+declarations page).
+
+In this mode:
+- The adapter is probably **not broken** — don't edit `backend/carriers/`
+  unless you find a clear bug.
+- Focus on the live repair browser: find the right doc location and
+  download the right PDFs into `delivered/`.
+- Write `STATUS: DONE` once you've delivered better documents.
+
 ## How to declare done
 
 Write `storage/repair/<SESSION_ID>/STATUS` with exactly one of these as the
 first line:
 
-- `DONE` — patch applied, mock tests pass, ready for human merge
+- `DONE` — patch applied (and/or PDFs delivered), ready for human merge
 - `NEED_HUMAN: <one-line reason>` — you're stuck or out of ideas
 
 After the first line, you may add a multi-line summary of what you found,

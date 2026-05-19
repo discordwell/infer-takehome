@@ -10,7 +10,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from sse_starlette.sse import EventSourceResponse
 
-from . import auto_repair, identity, result_store
+from . import auto_repair, email_notifier, feedback_recovery, identity, result_store
 from .config import settings
 from .logging_config import configure_logging
 from .models import Carrier, LoginRequest, LoginResponse, MfaRequest, SessionState
@@ -41,6 +41,7 @@ async def lifespan(app: FastAPI):
         except asyncio.CancelledError:
             pass
         await auto_repair.shutdown()
+        await email_notifier.shutdown()
         await runner.shutdown()
 
 
@@ -189,6 +190,54 @@ async def status_stream(session_id: str, request: Request) -> EventSourceRespons
                 slot_manager.release(uid)
 
     return EventSourceResponse(event_gen())
+
+
+@app.post("/api/feedback/{session_id}")
+async def feedback(session_id: str, payload: dict) -> dict:
+    """User feedback on returned docs.
+
+    payload: {"ok": bool}. ok=true: log + release slot. ok=false: kick the
+    feedback-recovery Claude flow (analyzer + auto_repair with user_rejected
+    context).
+    """
+    ok = bool(payload.get("ok"))
+    try:
+        session = manager.get(session_id)
+    except SessionNotFoundError:
+        raise HTTPException(status_code=404, detail="unknown session")
+
+    if ok:
+        slot_manager.release_session(session_id)
+        log.info(
+            "feedback: positive session=%s docs=%d", session_id, len(session.docs)
+        )
+        return {"ok": True, "action": "released"}
+
+    result = await feedback_recovery.trigger(session_id)
+    return {"ok": False, **result}
+
+
+@app.post("/api/notify/{session_id}")
+async def notify_endpoint(session_id: str, payload: dict) -> dict:
+    """Register an email to be notified when the active repair concludes."""
+    email = (payload.get("email") or "").strip()
+    if not email_notifier.is_valid_email(email):
+        raise HTTPException(status_code=400, detail="invalid email")
+    try:
+        session = manager.get(session_id)
+    except SessionNotFoundError:
+        raise HTTPException(status_code=404, detail="unknown session")
+    if not session.repair_kicked:
+        raise HTTPException(
+            status_code=409,
+            detail="no active repair for this session — nothing to notify about",
+        )
+    import time as _time
+
+    session.notify_email = email
+    session.notify_started_at = _time.time()
+    started_new = email_notifier.schedule_watch(session_id)
+    return {"ok": True, "watching": True, "started_new": started_new}
 
 
 @app.post("/api/mfa/{session_id}", status_code=status.HTTP_202_ACCEPTED)

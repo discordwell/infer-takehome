@@ -43,5 +43,12 @@ class Settings(BaseSettings):
     usaa_worker_base_url: str | None = None
     dev_prefill_creds: bool = False
 
+    # Email notification (Resend). When unset, /api/notify still accepts
+    # signups but the watcher logs and skips the actual send.
+    resend_api_key: str | None = None
+    resend_from_email: str = "Infer <noreply@mail.discordwell.com>"
+    email_max_attachment_bytes: int = 20_000_000  # 20MB
+    notify_wall_seconds: int = 18000  # 5h cap
+
 
 settings = Settings()

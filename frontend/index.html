@@ -73,9 +73,18 @@
     <!-- DOCS STATE -->
     <section id="state-docs" class="state hidden">
       <h2>3. Policy documents</h2>
+      <details id="previous-attempt" class="hidden">
+        <summary>Previous attempt (rejected) &mdash; click to expand</summary>
+        <ul id="previous-docs-list"></ul>
+      </details>
       <p id="docs-summary"></p>
       <p id="docs-latency" class="hint"></p>
       <ul id="docs-list"></ul>
+      <div id="feedback-bar" class="hidden">
+        <p class="hint">Are these the documents you wanted?</p>
+        <button id="feedback-ok-btn" type="button" class="feedback-yes">Yes, got what I needed</button>
+        <button id="feedback-bad-btn" type="button" class="feedback-no">No, wrong documents</button>
+      </div>
       <button id="restart-btn" type="button">Start over</button>
     </section>
 
@@ -99,6 +108,14 @@
         <ol id="repair-log"></ol>
       </details>
       <div id="repair-verdict" class="hidden"></div>
+      <div id="email-notify" class="email-notify hidden">
+        <p class="hint">This can take a while. Want an email when it's done?</p>
+        <form id="email-form">
+          <input id="email-input" type="email" placeholder="you@example.com" autocomplete="email" required />
+          <button type="submit">Email me</button>
+        </form>
+        <p id="email-feedback" class="hint"></p>
+      </div>
     </section>
   </main>
 

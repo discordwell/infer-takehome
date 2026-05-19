@@ -86,3 +86,30 @@ button:disabled { background: #888; cursor: not-allowed; }
 #repair-verdict { margin-top: 0.6rem; padding: 0.6rem; border-radius: 3px; font-size: 0.9rem; }
 #repair-verdict.done { background: #e8f7e8; border: 1px solid #b2e0b2; color: #246624; }
 #repair-verdict.need_human { background: #fff0f0; border: 1px solid #ffd0d0; color: #8a1010; }
+
+/* Feedback buttons under the docs list */
+#feedback-bar { margin-top: 1rem; padding: 0.75rem; background: #f4f8ff; border: 1px solid #ccd9f0; border-radius: 4px; }
+#feedback-bar p { margin: 0 0 0.5rem; }
+#feedback-bar button { margin-right: 0.5rem; }
+button.feedback-yes { background: #2a7a2a; }
+button.feedback-yes:hover { background: #1f5c1f; }
+button.feedback-no { background: #b06a00; }
+button.feedback-no:hover { background: #8a5400; }
+
+/* Previous-attempt expander shown when feedback recovery is active */
+#previous-attempt { margin-bottom: 1rem; padding: 0.5rem 0.75rem; background: #f7f5ef; border: 1px solid #d8d2bf; border-radius: 4px; }
+#previous-attempt summary { cursor: pointer; font-size: 0.9rem; color: #555; }
+#previous-docs-list { list-style: none; padding: 0; margin: 0.5rem 0 0; font-size: 0.85rem; }
+#previous-docs-list li { padding: 0.25rem 0; border-bottom: 1px dotted #d8d2bf; }
+#previous-docs-list li:last-child { border-bottom: none; }
+#previous-docs-list .doc-category { color: #888; margin-left: 0.5rem; font-style: italic; }
+
+/* Email-me-when-done panel */
+.email-notify { margin-top: 0.75rem; padding: 0.6rem; background: #fff; border: 1px solid #e6c97e; border-radius: 3px; }
+.email-notify form { flex-direction: row; align-items: stretch; gap: 0.5rem; }
+.email-notify input[type=email] { flex: 1; }
+.email-notify button { white-space: nowrap; }
+.email-notify p { margin: 0; }
+#email-feedback { color: #5a5a00; margin-top: 0.4rem; min-height: 1em; }
+#email-feedback.success { color: #246624; }
+#email-feedback.error { color: #8a1010; }

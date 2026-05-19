@@ -157,6 +157,29 @@ Tuning env vars: `REPAIR_ENABLED`, `REPAIR_MAX_WALL_SECONDS`,
 
 When the orchestrator fails and `auto_repair.capture_and_kick` returns True, the session's `repair_kicked` flag is set so the SSE stays open past `ERROR`. `auto_repair._run_claude` runs claude with `--output-format stream-json --verbose`, translates each assistant text / `tool_use` / `tool_result` block into a display chunk, and pushes them through `session_manager.publish_repair_log` to the triggering session's SSE. The frontend renders these live in a collapsible "Claude is repairing this carrier" panel; final STATUS (`DONE` / `NEED_HUMAN`) is surfaced via a `repair_done` event.
 
+## User feedback + same-run document delivery
+
+After a successful fetch, the frontend shows two buttons: "Got what I needed" and "Wrong documents." The wrong-docs path:
+
+1. `POST /api/feedback/{sid}` with `{ok: false}` calls `feedback_recovery.trigger`.
+2. `pdf_analyzer` spawns `claude -p` with the rejected PDFs attached (Claude reads them natively via its Read tool) and returns per-doc `{name, label, description, category}` — categories are `policy_doc` / `cover_or_brochure` / `login_or_error` / `other`. Cached to `storage/analyses/<sid>.json` so a re-trigger doesn't re-spend.
+3. `auto_repair.capture_and_kick` is invoked with `kick_reason="user_rejected"` and the analysis stuffed into `extra_context`; this is written to `context.json` so the repair prompt's "Feedback-recovery context" section primes Claude on what the user said was wrong.
+4. Claude navigates the live repair browser (already authenticated via the saved storage_state) to find better docs, downloads them into `storage/repair/<sid>/delivered/`.
+5. `auto_repair._check_done` polls on every cadence tick AND right after STATUS lands; `repair_deliver.deliver_if_present` picks up the new PDFs, validates the `%PDF` magic, builds `Document` + `doc_bytes`, and calls `session_manager.set_docs` to publish `docs_ready` to the user's still-open SSE. Idempotent via a `delivered.json` marker.
+6. Frontend demotes the originally-rejected docs into a "Previous attempt" expander (tracked by `rejectedDocIds` so SSE snapshot replays don't re-render them) and shows the new docs with fresh feedback buttons.
+
+`repair_browser.cleanup()` harvests `ctx.storage_state()` before terminating the chromium subprocess and persists it via `storage.save(carrier, username)` — every successful repair extends the saved auth so future quick-path runs continue to skip MFA.
+
+## Email notify (5h watcher)
+
+Whenever a repair is active (`repair_kicked` is true — either from orchestrator-ERROR OR from a user "wrong docs" click), the UI shows an "Email me when done" input. `POST /api/notify/{sid}` validates the email, stamps it on `session.notify_email`, and spawns `email_notifier.watch(sid)`. The watcher awaits `session.repair_done_event` (set by `publish_repair_done`) with a 5h hard cap (`settings.notify_wall_seconds=18000`).
+
+On fire it sends a Resend email:
+- **Success path** (docs were delivered): subject "Your <carrier> documents are ready", base64-encoded PDF attachments. If total attachment bytes exceed `settings.email_max_attachment_bytes` (default 20MB), it falls back to a links-only body pointing at `/api/docs/{sid}/{doc_id}` (live for the result_store TTL).
+- **Failure / timeout path**: subject "We couldn't fetch your <carrier> documents", brief reason.
+
+Resend wrapper is just httpx — no SDK dep. From-address `Infer <noreply@mail.discordwell.com>` uses the verified `mail.discordwell.com` domain.
+
 ## Out of scope
 
 - Real authentication (cookies identify but don't authenticate).

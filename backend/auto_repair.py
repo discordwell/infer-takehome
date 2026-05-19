@@ -23,6 +23,7 @@ import asyncio
 import json
 import logging
 import os
+import shutil
 import time
 from pathlib import Path
 from typing import Awaitable, Callable
@@ -59,6 +60,16 @@ VERIFY_TIMEOUT_SECONDS = int(os.environ.get("REPAIR_VERIFY_TIMEOUT_SECONDS", "90
 # stream-json lines can occasionally exceed asyncio's default 64 KB
 # StreamReader limit (large tool_result blobs with DOM dumps). Raise to 10 MB.
 STREAM_LINE_LIMIT = 10 * 1024 * 1024
+# How long to keep storage/repair/<sid>/ and storage/debug/<carrier>/<file>
+# artifacts before garbage-collecting them. Default: 7 days. Cleanup runs
+# once at controller startup and then every CLEANUP_INTERVAL_SECONDS.
+ARTIFACT_TTL_SECONDS = int(
+    os.environ.get("REPAIR_ARTIFACT_TTL_SECONDS", str(7 * 86400))
+)
+CLEANUP_INTERVAL_SECONDS = int(
+    os.environ.get("REPAIR_CLEANUP_INTERVAL_SECONDS", "3600")
+)
+DEBUG_ROOT = Path("storage/debug")
 
 ALLOWED_TOOLS = ["Read", "Write", "Edit", "Bash", "Glob", "Grep"]
 
@@ -94,8 +105,19 @@ async def capture_and_kick(
     username: str,
     exception: BaseException,
     step: str = "unknown",
+    *,
+    kick_reason: str = "orchestrator_error",
+    extra_context: dict | None = None,
 ) -> bool:
-    """Write failure context and (if not deduped) spawn claude -p."""
+    """Write failure context and (if not deduped) spawn claude -p.
+
+    kick_reason: 'orchestrator_error' (default — the carrier flow itself
+    threw) or 'user_rejected' (user clicked "wrong documents" on docs they
+    received successfully).
+    extra_context: optional dict merged into context.json — e.g., the
+    feedback-recovery path passes the prior pdf_analysis here so claude
+    knows what was rejected and why.
+    """
     if not is_enabled():
         log.info(
             "capture_and_kick skipped: REPAIR_ENABLED not truthy "
@@ -142,6 +164,7 @@ async def capture_and_kick(
                     saved_state,
                     INITIAL_URLS.get(carrier),
                     headed=headed,
+                    username=username,
                 )
                 (out_dir / "cdp_endpoint.txt").write_text(cdp_endpoint + "\n")
             except Exception as br_err:  # noqa: BLE001
@@ -161,9 +184,12 @@ async def capture_and_kick(
             "carrier": carrier,
             "username": username,
             "step": step,
+            "kick_reason": kick_reason,
             "exception": f"{type(exception).__name__}: {exception}",
             "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         }
+        if extra_context:
+            context_obj.update(extra_context)
         (out_dir / "context.json").write_text(json.dumps(context_obj, indent=2))
     except Exception as cap_err:  # noqa: BLE001
         log.warning("auto-repair context capture failed: %s", cap_err)
@@ -724,6 +750,16 @@ async def _on_verification_failed(
 
 
 async def _check_done(session_id: str, carrier: str) -> bool:
+    # Poll for early deliveries on every check — claude may drop verified
+    # PDFs in delivered/ before writing STATUS, and we want them to reach the
+    # user the moment they hit disk.
+    try:
+        from . import repair_deliver
+
+        repair_deliver.deliver_if_present(session_id)
+    except Exception as e:  # noqa: BLE001
+        log.debug("early deliver poll failed: %s", e)
+
     status_file = REPAIR_ROOT / session_id / "STATUS"
     if not status_file.exists():
         return False
@@ -744,6 +780,17 @@ async def _check_done(session_id: str, carrier: str) -> bool:
         if not passed:
             await _on_verification_failed(session_id, carrier, reason or "?", body)
             return False  # keep the session active; cadence will resume claude
+
+    # Ship any PDFs claude downloaded into delivered/ to the user's session
+    # BEFORE we tear down the carrier slot. Per the user's spec: poll on
+    # every _check_done (not just on STATUS landing) so docs flow as soon as
+    # they hit disk.
+    try:
+        from . import repair_deliver
+
+        repair_deliver.deliver_if_present(session_id)
+    except Exception as e:  # noqa: BLE001
+        log.warning("repair_deliver failed: %s", e)
 
     async with _lock:
         _active.pop(carrier, None)
@@ -769,22 +816,71 @@ async def _check_done(session_id: str, carrier: str) -> bool:
 
 
 async def cadence_loop() -> None:
-    """Long-running background task. Resumes active repairs every 5 minutes."""
+    """Long-running background task. Resumes active repairs every 5 minutes
+    and garbage-collects aged repair / debug artifacts."""
     log.info(
-        "auto-repair cadence loop starting (interval=%ds, max wall=%ds)",
+        "auto-repair cadence loop starting (interval=%ds, max wall=%ds, "
+        "artifact ttl=%ds)",
         RESUME_INTERVAL_SECONDS,
         MAX_REPAIR_WALL_SECONDS,
+        ARTIFACT_TTL_SECONDS,
     )
+    try:
+        cleanup_old_artifacts()
+    except Exception as e:  # noqa: BLE001
+        log.warning("startup artifact cleanup raised: %s", e)
+    last_cleanup = time.time()
     while True:
         try:
             await asyncio.sleep(RESUME_INTERVAL_SECONDS)
             if not is_enabled():
                 continue
             await _cadence_tick()
+            if time.time() - last_cleanup > CLEANUP_INTERVAL_SECONDS:
+                try:
+                    cleanup_old_artifacts()
+                except Exception as e:  # noqa: BLE001
+                    log.warning("periodic artifact cleanup raised: %s", e)
+                last_cleanup = time.time()
         except asyncio.CancelledError:
             return
         except Exception as e:  # noqa: BLE001
             log.exception("auto-repair cadence tick crashed: %s", e)
+
+
+def cleanup_old_artifacts() -> None:
+    """Prune storage/repair/<sid>/ and storage/debug/<carrier>/ entries
+    whose mtime is older than ARTIFACT_TTL_SECONDS.
+
+    Active repair sessions (carriers currently in `_active`) are
+    skipped — they may have recent mtimes but we still keep them.
+    """
+    cutoff = time.time() - ARTIFACT_TTL_SECONDS
+    active_session_ids = {info["session_id"] for info in _active.values()}
+    pruned = 0
+    kept_active = 0
+    for root in (REPAIR_ROOT, DEBUG_ROOT):
+        if not root.exists():
+            continue
+        for entry in root.iterdir():
+            try:
+                if entry.is_dir() and entry.name in active_session_ids:
+                    kept_active += 1
+                    continue
+                if entry.stat().st_mtime >= cutoff:
+                    continue
+                if entry.is_dir():
+                    shutil.rmtree(entry, ignore_errors=True)
+                else:
+                    entry.unlink(missing_ok=True)
+                pruned += 1
+            except Exception as e:  # noqa: BLE001
+                log.warning("artifact cleanup: failed to prune %s: %s", entry, e)
+    if pruned or kept_active:
+        log.info(
+            "artifact cleanup: pruned=%d kept_active=%d ttl=%ds",
+            pruned, kept_active, ARTIFACT_TTL_SECONDS,
+        )
 
 
 async def _cadence_tick() -> None:

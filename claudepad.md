@@ -2,6 +2,65 @@
 
 ## Session Summaries
 
+### 2026-05-19 — Feedback recovery, live Claude doc delivery, email-on-done
+
+Three new subsystems on top of multi-session + live-Claude-UI:
+
+- **PDF analyzer** (`backend/pdf_analyzer.py`): lazy. Spawns `claude -p` with the
+  rejected PDFs attached as file paths, Claude reads them via its native PDF
+  Read, returns per-doc `{name, label, description, category}` where category
+  is `policy_doc` / `cover_or_brochure` / `login_or_error` / `other`. Cached
+  to `storage/analyses/<sid>.json`. Only runs on user "wrong docs" click —
+  no cost on the happy path.
+- **Feedback recovery** (`backend/feedback_recovery.py` + `POST /api/feedback`):
+  user clicks "Wrong documents" → run analyzer → call
+  `auto_repair.capture_and_kick` with `kick_reason="user_rejected"` and the
+  analysis stuffed into `extra_context` (read by Claude via context.json).
+  The repair prompt has a new "Feedback-recovery context" section telling
+  Claude to focus on finding better docs rather than patching the adapter.
+- **Same-run delivery bridge** (`backend/repair_deliver.py`): Claude drops
+  candidate PDFs into `storage/repair/<sid>/delivered/`; the controller
+  polls on every `_check_done` (early + after STATUS) and ships them to
+  the user via `session_manager.set_docs` → `docs_ready` SSE → frontend
+  renders. Idempotent via a `delivered.json` marker. The repair_prompt got
+  a new "Deliver real PDFs to the waiting user" section explaining this.
+- **Auth state refresh** (`backend/repair_browser.py`): `cleanup()` harvests
+  `ctx.storage_state()` before terminating chromium and persists it via
+  `storage.save(carrier, username)` — every successful repair extends saved
+  auth so future quick-path runs keep working. Plumbed `username` through
+  `spawn()` and onto the `RepairBrowser` dataclass.
+- **Email notify** (`backend/email_notifier.py` + `POST /api/notify`): when
+  any repair is active, UI shows email opt-in. Watcher coroutine awaits
+  `session.repair_done_event` with a 5h cap (`notify_wall_seconds=18000`).
+  On fire it Resend-sends with PDF attachments (base64), or falls back to
+  links if total > 20MB (`email_max_attachment_bytes`). Verified domain:
+  `Infer <noreply@mail.discordwell.com>` (key from
+  `catena-takehome/.env`). httpx wrapper — no Resend SDK dep.
+- **Frontend** (`frontend/{index.html,app.js,style.css}`): docs view gets
+  ✓/✗ buttons. ✗ stashes rejected docs into a "Previous attempt" expander,
+  shows "Looking for better documents…", reveals repair panel + email
+  opt-in. Tracks `rejectedDocIds` so SSE snapshot replays don't re-render
+  the same docs the user just rejected.
+- **Session manager extensions**: `Session.repair_done_event` (asyncio.Event
+  the watcher awaits), `notify_email`, `notify_started_at`,
+  `feedback_recovery_active`, `pdf_analysis`. `publish_repair_done` sets
+  the event.
+- **`capture_and_kick`** gets `kick_reason` (default
+  `"orchestrator_error"`) and `extra_context` kwargs. Reason is recorded
+  in `context.json`; Claude branches on it via the repair prompt.
+- **Tests**: 27 new across `test_repair_deliver`, `test_pdf_analyzer`,
+  `test_email_notifier`, `test_feedback_recovery`. Mocks: claude
+  subprocess (canned JSON via AsyncMock), Resend httpx (fake client). All
+  130 offline tests pass in ~13s.
+- **Wet test**: two-tab flow via `/?fresh=N` — login → MFA → docs render
+  with feedback bar; ✓ releases slot; ✗ moves docs to expander, shows
+  recovery panel + email opt-in. Email opt-in accepts and disables form.
+  Fixed bug where SSE snapshot replay re-rendered rejected docs (now
+  guarded by `rejectedDocIds` set).
+- **NOT deployed yet**: other agent has uncommitted edits to Dockerfile +
+  usaa.py + docker-compose.prod.yml in flight. Holding deploy until those
+  land.
+
 ### 2026-05-19 — Multi-session support: per-uid slot, per-carrier lock, live Claude UI
 
 - **Identity** (`backend/identity.py` new): `demo_uid` cookie issued on first

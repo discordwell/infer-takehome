@@ -30,6 +30,11 @@ class Session:
     uid: str | None = None
     repair_log: list[dict] = field(default_factory=list)
     repair_kicked: bool = False
+    repair_done_event: asyncio.Event = field(default_factory=asyncio.Event)
+    feedback_recovery_active: bool = False
+    notify_email: str | None = None
+    notify_started_at: float | None = None
+    pdf_analysis: list[dict] | None = None
 
 
 class SessionNotFoundError(Exception):
@@ -205,6 +210,8 @@ class SessionManager:
         )
         for q in session.subscribers:
             q.put_nowait(snapshot)
+        # Email notifier (if any) is awaiting this event.
+        session.repair_done_event.set()
 
     async def request_mfa(self, session_id: str, timeout: float = 90.0) -> str:
         """Called by the carrier flow when MFA is required.
