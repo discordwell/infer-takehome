@@ -9,6 +9,7 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         ca-certificates \
         curl \
+        git \
         gnupg \
         xvfb \
         fonts-liberation \
@@ -60,6 +61,15 @@ RUN uv sync --frozen --no-dev \
 
 COPY . .
 RUN mkdir -p storage/sessions storage/browser-profiles storage/debug storage/logs storage/results storage/partial-auth
+
+# Initialize a baseline git repo so auto_repair._verify_fix can diff
+# claude's edits against the shipped image. The deploy rsync excludes .git
+# so this snapshot represents the image's pristine state.
+RUN git init -q \
+    && git config user.email "auto-repair@infer.local" \
+    && git config user.name  "auto-repair baseline" \
+    && git add -A \
+    && git commit -q -m "image baseline"
 
 EXPOSE 8000
 

@@ -59,7 +59,7 @@ POLICY_DOCUMENT_SEARCH_TERMS = (
     "Initial",
     "New Policy",
 )
-DEBUG_DIR = Path("/tmp")
+DEBUG_DIR = Path("storage/debug/usaa")
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 USAA_CHROME_PROFILE_DIR = (
     PROJECT_ROOT / "storage" / "browser-profiles" / "usaa-chrome"
