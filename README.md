@@ -84,6 +84,7 @@ Useful environment toggles:
 - `WORKER_PROXY_CARRIERS=usaa`: only USAA proxies to a worker; other carriers run in this process.
 - `SESSION_TTL_SECONDS=86400`: keep active UI sessions and fetched document bytes for 24 hours.
 - `AUTH_STATE_MAX_AGE_SECONDS=2592000`: try saved browser auth state for up to 30 days.
+- `PERSIST_COMPLETED_RESULTS=true`: persist completed document results under `storage/results/`.
 - `USAA_QUICK_PATH_MAX_AGE_SECONDS=0`: force a fresh USAA login instead of stored-session reuse.
 - `USAA_LOGIN_DRIVER=os_browser`: use real local Chrome for USAA credential submission.
 - `USAA_OS_BROWSER_PROFILE_DIR=storage/browser-profiles/<name>`: choose the Chrome profile used by the USAA OS-browser path.
@@ -219,6 +220,7 @@ backend/
   orchestrator.py      login -> MFA -> document flow
   session_manager.py   in-process session state and events
   storage.py           Playwright storage_state persistence
+  result_store.py      completed document/result persistence
   playwright_runner.py shared Playwright/Chrome lifecycle
   carriers/
     usaa.py            USAA-specific flow
@@ -237,11 +239,13 @@ scripts/
 
 ## Session Reuse
 
-After a successful live run, Playwright storage state is saved under `storage/sessions/` using a hash of `(carrier, username)`. Later runs for the same carrier and username try that state first. If the carrier still trusts the session, the app skips MFA and goes straight to documents; otherwise it falls back to a full login.
+After the app crosses login/MFA, Playwright storage state is saved under `storage/sessions/` using a hash of `(carrier, username)`. This stores browser login state such as cookies and localStorage, not passwords. Later runs for the same carrier and username try that state first. If the carrier still trusts the session, the app skips MFA and goes straight to documents; otherwise it falls back to a full login.
+
+If the carrier prompts for MFA and the user never completes it, the app does not promote that browser state to a reusable login. The user will need to start a new login later; no password is retained.
 
 By default, non-USAA saved auth state is tried for 30 days (`AUTH_STATE_MAX_AGE_SECONDS=2592000`). USAA uses a shorter 30-minute freshness window (`USAA_QUICK_PATH_MAX_AGE_SECONDS=1800`) because stale USAA sessions waste live attempts. Set either value to `0` to disable that app-side freshness check. Carrier cookies can still expire earlier if the carrier invalidates them.
 
-Active UI sessions, including fetched document bytes served through `/api/docs/{session_id}/{doc_id}`, default to 24 hours via `SESSION_TTL_SECONDS=86400`.
+Active UI sessions default to 24 hours via `SESSION_TTL_SECONDS=86400`. Completed document results are also persisted to `storage/results/`, so existing `/api/status/{session_id}` and `/api/docs/{session_id}/{doc_id}` links can survive a container restart until that TTL expires.
 
 ## Persistent Logs
 

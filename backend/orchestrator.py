@@ -257,6 +257,7 @@ async def _finish_after_login(
         _reset_timing(flow)
         _mark_timing(flow, "no_mfa_fetch_start")
 
+    await _save_auth_state(ctx, carrier, username)
     manager.transition(
         session_id, SessionState.FETCHING_DOCS, detail="Fetching documents"
     )
@@ -278,6 +279,19 @@ async def _finish_after_login(
         timings_ms=_timing_snapshot(flow),
     )
     _log_timing(flow, session_id)
+
+
+async def _save_auth_state(ctx, carrier: Carrier, username: str) -> None:
+    try:
+        state = await ctx.storage_state()
+        storage.save(carrier.value, username, state)
+        log.info(
+            "saved %s browser auth state for user hash %s",
+            carrier.value,
+            storage.user_hash(username),
+        )
+    except Exception as e:  # noqa: BLE001
+        log.warning("failed to save %s browser auth state: %s", carrier.value, e)
 
 
 async def _fetch_documents_with_progress(

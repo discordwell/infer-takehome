@@ -54,7 +54,7 @@ RUN uv sync --frozen --no-dev \
     && uv run playwright install chromium
 
 COPY . .
-RUN mkdir -p storage/sessions storage/browser-profiles storage/debug storage/logs
+RUN mkdir -p storage/sessions storage/browser-profiles storage/debug storage/logs storage/results
 
 EXPOSE 8000
 

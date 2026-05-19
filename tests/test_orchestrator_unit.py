@@ -138,6 +138,26 @@ async def test_login_context_no_mfa_fetches_docs(monkeypatch):
     assert flow.fetch_count == 1
 
 
+async def test_auth_state_saved_before_document_fetch_failure(monkeypatch):
+    flow = _FetchFailureFlow(mfa_required=False)
+    saved = []
+    monkeypatch.setattr(orchestrator, "get_flow", lambda carrier: flow)
+    monkeypatch.setattr(orchestrator.storage, "load", lambda carrier, username: None)
+    monkeypatch.setattr(
+        orchestrator.storage,
+        "save",
+        lambda carrier, username, state: saved.append((carrier, username, state)),
+    )
+    manager = SessionManager()
+    session = manager.create(Carrier.PROGRESSIVE, "u")
+
+    await orchestrator.execute_login(manager, session.id, Carrier.PROGRESSIVE, "u", "p")
+
+    final = manager.get(session.id)
+    assert final.state == SessionState.ERROR
+    assert saved == [("progressive", "u", {"cookies": [], "origins": []})]
+
+
 async def test_login_context_block_sets_error(monkeypatch):
     flow = _BlockingLoginContextFlow()
     monkeypatch.setattr(orchestrator, "get_flow", lambda carrier: flow)
@@ -202,6 +222,11 @@ class _BlockingLoginContextFlow(_LoginContextFlow):
     async def login_context(self, runner, username, password, context_options):
         raise RuntimeError("USAA login blocked after password submit")
         yield
+
+
+class _FetchFailureFlow(_LoginContextFlow):
+    async def fetch_documents(self, page, http, ctx):
+        raise RuntimeError("document fetch failed")
 
 
 async def _wait_for_state(manager: SessionManager, session_id: str, state: SessionState):

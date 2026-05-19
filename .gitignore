@@ -12,6 +12,7 @@ storage/manual-traces/
 storage/backups/
 storage/debug/
 storage/logs/
+storage/results/
 storage/*.json
 !storage/sessions/.gitkeep
 

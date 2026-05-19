@@ -13,6 +13,10 @@ def _key(carrier: str, username: str) -> str:
     return hashlib.sha256(f"{carrier}:{username}".encode()).hexdigest()
 
 
+def user_hash(username: str) -> str:
+    return hashlib.sha256(username.encode()).hexdigest()
+
+
 def _path(carrier: str, username: str) -> Path:
     STORAGE_DIR.mkdir(parents=True, exist_ok=True)
     return STORAGE_DIR / f"{_key(carrier, username)}.json"

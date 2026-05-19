@@ -63,7 +63,14 @@ async def status_stream(session_id: str, request: Request) -> EventSourceRespons
     try:
         queue = manager.subscribe(session_id)
     except SessionNotFoundError:
-        raise HTTPException(status_code=404, detail="unknown session")
+        persisted = manager.get_persisted_status(session_id)
+        if persisted is None:
+            raise HTTPException(status_code=404, detail="unknown session")
+
+        async def persisted_event_gen():
+            yield {"event": "docs_ready", "data": persisted.model_dump_json()}
+
+        return EventSourceResponse(persisted_event_gen())
 
     async def event_gen():
         try:
@@ -151,8 +158,11 @@ async def get_doc(session_id: str, doc_id: str) -> Response:
         raise HTTPException(status_code=404, detail="unknown session")
     if body is None:
         raise HTTPException(status_code=404, detail="unknown doc")
-    session = manager.get(session_id)
-    doc_meta = next((d for d in session.docs if d.id == doc_id), None)
+    try:
+        session = manager.get(session_id)
+        doc_meta = next((d for d in session.docs if d.id == doc_id), None)
+    except SessionNotFoundError:
+        doc_meta = manager.get_persisted_doc(session_id, doc_id)
     headers = {
         "Content-Disposition": (
             f'inline; filename="{doc_meta.name if doc_meta else doc_id + ".pdf"}"'

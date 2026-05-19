@@ -99,6 +99,22 @@ def test_set_docs_transitions_to_done_and_publishes():
     assert mgr.get_doc_bytes(session.id, "d1") == b"%PDF-1.4"
 
 
+def test_set_docs_persists_completed_result_for_later_manager():
+    mgr = SessionManager()
+    session = mgr.create(Carrier.PROGRESSIVE, "user")
+    docs = [Document(id="d1", name="dec.pdf", size_bytes=8)]
+    mgr.set_docs(session.id, docs, {"d1": b"%PDF-1.4"})
+
+    restored = SessionManager()
+
+    status = restored.get_persisted_status(session.id)
+    assert status is not None
+    assert status.state == SessionState.DONE
+    assert status.docs == docs
+    assert restored.get_persisted_doc(session.id, "d1") == docs[0]
+    assert restored.get_doc_bytes(session.id, "d1") == b"%PDF-1.4"
+
+
 def test_publish_docs_progress_keeps_fetching_and_publishes():
     mgr = SessionManager()
     session = mgr.create(Carrier.USAA, "user")

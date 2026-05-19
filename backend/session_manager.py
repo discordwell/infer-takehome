@@ -6,6 +6,7 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Awaitable, Callable
 
+from . import result_store
 from .config import settings
 from .models import Carrier, Document, SessionState, StatusEvent
 
@@ -90,6 +91,15 @@ class SessionManager:
         session.doc_bytes = doc_bytes
         session.timings_ms = timings_ms
         session.state = SessionState.DONE
+        if settings.persist_completed_results:
+            result_store.save_done(
+                session_id=session_id,
+                carrier=session.carrier,
+                username=session.username,
+                docs=docs,
+                doc_bytes=doc_bytes,
+                timings_ms=timings_ms,
+            )
         self._publish(session, event="docs_ready")
 
     def publish_docs_progress(
@@ -155,8 +165,25 @@ class SessionManager:
         session.mfa_event.set()
 
     def get_doc_bytes(self, session_id: str, doc_id: str) -> bytes | None:
-        session = self.get(session_id)
-        return session.doc_bytes.get(doc_id)
+        session = self._sessions.get(session_id)
+        if session is not None:
+            return session.doc_bytes.get(doc_id)
+        if not settings.persist_completed_results:
+            return None
+        result_store.prune(self._ttl)
+        return result_store.load_doc_bytes(session_id, doc_id)
+
+    def get_persisted_status(self, session_id: str) -> StatusEvent | None:
+        if not settings.persist_completed_results:
+            return None
+        result_store.prune(self._ttl)
+        return result_store.load_status(session_id)
+
+    def get_persisted_doc(self, session_id: str, doc_id: str) -> Document | None:
+        if not settings.persist_completed_results:
+            return None
+        result_store.prune(self._ttl)
+        return result_store.load_doc(session_id, doc_id)
 
     def make_mfa_callable(
         self, session_id: str
@@ -189,6 +216,8 @@ class SessionManager:
             session = self._sessions.pop(sid)
             if session.task and not session.task.done():
                 session.task.cancel()
+        if settings.persist_completed_results:
+            result_store.prune(self._ttl)
 
 
 manager = SessionManager(ttl_seconds=settings.session_ttl_seconds)

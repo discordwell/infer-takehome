@@ -10,13 +10,20 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from backend import playwright_runner, storage
+from backend import playwright_runner, result_store, storage
 
 
 @pytest.fixture
 def tmp_session_dir(tmp_path: Path, monkeypatch) -> Path:
     monkeypatch.setattr(storage, "STORAGE_DIR", tmp_path)
     return tmp_path
+
+
+@pytest.fixture(autouse=True)
+def tmp_result_store_dir(tmp_path: Path, monkeypatch) -> Path:
+    path = tmp_path / "results"
+    monkeypatch.setattr(result_store, "RESULTS_DIR", path)
+    return path
 
 
 @pytest.fixture

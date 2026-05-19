@@ -10,6 +10,7 @@ class Settings(BaseSettings):
     mfa_timeout_seconds: int = 300
     auth_state_max_age_seconds: int = 2592000
     usaa_quick_path_max_age_seconds: int = 1800
+    persist_completed_results: bool = True
     usaa_login_driver: str = "os_browser"
     usaa_os_browser_profile_dir: str = "storage/browser-profiles/usaa-os-browser"
     usaa_os_login_timeout_seconds: int = 90
