@@ -159,7 +159,7 @@ async def main() -> None:
             ctx.on("page", lambda page: asyncio.create_task(_attach_page(page, log_path)))
 
             print(f"Manual probe running for {carrier}.")
-            print(f"Drive the visible Chrome window. No credentials or input values are recorded.")
+            print("Drive the visible Chrome window. No credentials or input values are recorded.")
             print(f"Trace: {log_path}")
             print("Press Enter here when you are done.")
             await asyncio.to_thread(sys.stdin.readline)

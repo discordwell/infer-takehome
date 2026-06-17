@@ -26,7 +26,7 @@ import os
 import shutil
 import time
 from pathlib import Path
-from typing import Awaitable, Callable
+from typing import Callable
 
 from . import auto_repair_patches, repair_browser, storage
 
@@ -934,6 +934,33 @@ async def _on_verification_failed(
         log.warning("could not append verification failure to context: %s", e)
 
 
+def parse_status_verdict(body: str) -> str | None:
+    """Extract the verdict from a STATUS file body.
+
+    Returns ``"DONE"``, ``"NEED_HUMAN"``, or ``None`` when the first line
+    carries no recognizable verdict.
+
+    Tolerant of the variations claude actually emits as the first line:
+    - markdown decoration (``# DONE``, ``**DONE**``, `` `DONE` ``, leading
+      whitespace/tabs);
+    - an optional ``STATUS`` label prefix (``STATUS: DONE``, ``STATUS DONE``).
+      The repair prompt itself uses both the bare ``DONE`` and the
+      ``STATUS: DONE`` phrasings, so we must accept either — otherwise a
+      successful repair that writes ``STATUS: DONE`` is never recognized and
+      the session loops until the wall-clock timeout writes NEED_HUMAN.
+    """
+    first_line = (body or "").split("\n", 1)[0].strip()
+    normalized = first_line.lstrip("#`* \t").upper()
+    if normalized.startswith("STATUS"):
+        # Drop an optional "STATUS" label plus any trailing ":"/whitespace.
+        normalized = normalized[len("STATUS"):].lstrip(": \t")
+    if normalized.startswith("DONE"):
+        return "DONE"
+    if normalized.startswith("NEED_HUMAN"):
+        return "NEED_HUMAN"
+    return None
+
+
 async def _check_done(session_id: str, carrier: str) -> bool:
     # Poll for early deliveries on every check — claude may drop verified
     # PDFs in delivered/ before writing STATUS, and we want them to reach the
@@ -950,11 +977,9 @@ async def _check_done(session_id: str, carrier: str) -> bool:
         return False
     body = status_file.read_text()
     first_line = body.split("\n", 1)[0].strip()
-    normalized = first_line.lstrip("#`* ").upper()
-    if not (normalized.startswith("DONE") or normalized.startswith("NEED_HUMAN")):
+    verdict = parse_status_verdict(body)
+    if verdict is None:
         return False
-
-    verdict = "DONE" if normalized.startswith("DONE") else "NEED_HUMAN"
 
     if verdict == "DONE":
         log.info(

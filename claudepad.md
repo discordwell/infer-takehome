@@ -2,6 +2,38 @@
 
 ## Session Summaries
 
+### 2026-06-17 — Fix STATUS-verdict parser bug + first auto_repair tests
+
+Maintenance pass. Found and fixed a real latent bug in the auto-repair
+loop's completion detection:
+
+- **Bug:** `repair_prompt.md` tells claude to write `STATUS: DONE` (lines
+  130, 165, and the "What happens after STATUS: DONE" heading), but the
+  parser in `auto_repair._check_done` did
+  `first_line.lstrip("#`* ").upper()` then `startswith("DONE")` — it
+  stripped markdown decoration but NOT a literal `STATUS:` label. So a
+  successful repair that wrote `STATUS: DONE` was never recognized; the
+  session would loop until the 5h wall-clock timeout wrote NEED_HUMAN.
+- **Fix:** extracted a pure `parse_status_verdict(body)` helper that
+  tolerates an optional `STATUS`/`STATUS:` prefix (plus tabs), and rewired
+  `_check_done` to use it. `first_line` still computed for logging.
+  Verified purely additive — strict superset of the old accepting set, no
+  reclassification of any input the old parser accepted (independent
+  adversarial verifier confirmed). Reconciled the prompt wording with a
+  one-line note that `STATUS: DONE` is accepted.
+- **Tests:** new `tests/test_auto_repair.py` (54 tests) — the first tests
+  for `auto_repair.py` (the largest backend module, previously 0 tests).
+  Covers `parse_status_verdict` (incl. the regression case), plus the pure
+  helpers `_translate_stream_event`, `_stringify_tool_result`,
+  `_preview_dict`, `is_enabled`.
+- **Hygiene:** fixed all 7 ruff findings (unused imports incl.
+  `LoginResponse` in main.py, ambiguous `l`, f-string-without-placeholder)
+  and added a `[tool.ruff]` config (py311, line-length 88) so the lint
+  baseline is reproducible.
+- **Verify:** full offline suite 184 passed, 2 skipped (~13s, was 130
+  passed); `ruff check` clean. Committed on `main`; not pushed
+  (orchestrator handles push).
+
 ### 2026-05-19 16:10Z — Auto-repair end-to-end happy path proven on GitHub
 
 Session `3f12c5d996ca4e70a3b87a3deeb9c3a8` produced the first

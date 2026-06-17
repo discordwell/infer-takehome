@@ -111,7 +111,7 @@ async def main() -> None:
             "url": page.url,
             "visible_inputs": [i for i in inputs if i["visible"]],
             "visible_buttons": [b for b in buttons if b["visible"]],
-            "labels": [l for l in labels if l["text"]],
+            "labels": [lbl for lbl in labels if lbl["text"]],
             "forms": forms,
         }
         Path("/tmp/usaa_password_page.json").write_text(json.dumps(result, indent=2))

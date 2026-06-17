@@ -172,6 +172,8 @@ first line:
 - `DONE` — patch applied (and/or PDFs delivered), ready for human merge
 - `NEED_HUMAN: <one-line reason>` — you're stuck or out of ideas
 
+An optional `STATUS:` prefix is accepted, so `STATUS: DONE` works too.
+
 After the first line, you may add a multi-line summary of what you found,
 what you tried, what you changed (file paths + brief why), and any follow-up
 the human should do.
