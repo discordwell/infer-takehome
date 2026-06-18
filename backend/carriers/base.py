@@ -11,7 +11,7 @@ from ..models import Carrier, Document
 class CarrierFlow(ABC):
     """Hook-based contract for a carrier-portal flow.
 
-    A FlowRunner (in `runner.py`) drives login → MFA → fetch in a fixed
+    `orchestrator.execute_login` drives login → MFA → fetch in a fixed
     sequence. Each carrier subclass implements the portal-specific bits.
     """
 

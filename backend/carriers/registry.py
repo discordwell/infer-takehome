@@ -1,7 +1,6 @@
 from __future__ import annotations
 
-import os
-
+from ..env_flags import env_truthy
 from ..models import Carrier
 from .base import CarrierFlow
 from .geico import GeicoFlow
@@ -11,7 +10,7 @@ from .usaa import UsaaFlow
 
 
 def _build() -> dict[Carrier, CarrierFlow]:
-    if os.getenv("CARRIER_MOCK") == "1":
+    if env_truthy("CARRIER_MOCK"):
         return {
             Carrier.GEICO: MockFlow(Carrier.GEICO),
             Carrier.USAA: MockFlow(Carrier.USAA),

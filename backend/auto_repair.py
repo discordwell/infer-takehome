@@ -29,6 +29,7 @@ from pathlib import Path
 from typing import Callable
 
 from . import auto_repair_patches, repair_browser, storage
+from .env_flags import env_truthy
 
 log = logging.getLogger(__name__)
 
@@ -96,7 +97,7 @@ def is_enabled() -> bool:
     # Default OFF. Production opts in via REPAIR_ENABLED=true in
     # docker-compose.prod.yml. Keeps tests, local dev, and any environment
     # that doesn't explicitly want auto-repair from spawning claude subprocesses.
-    return os.environ.get("REPAIR_ENABLED", "").lower() in ("true", "1", "yes")
+    return env_truthy("REPAIR_ENABLED")
 
 
 async def capture_and_kick(

@@ -2,6 +2,43 @@
 
 ## Session Summaries
 
+### 2026-06-18 — Fix stringly-typed mock env flags (CARRIER_MOCK=true was a no-op)
+
+Maintenance pass. Fixed a reviewer-facing latent config bug and removed the
+dead settings behind it.
+
+- **Bug:** the mock-carrier toggles (CARRIER_MOCK, MOCK_BAD_PASSWORD,
+  MOCK_BAD_MFA, MOCK_SKIP_MFA, MOCK_QUICK_PATH_OK) were read with a literal
+  `os.getenv(...) == "1"`, but `.env.example` (which the README tells reviewers
+  to `cp`) and `mock.py`'s own docstring document them with pydantic-bool
+  spellings (`true`/`false`). So `CARRIER_MOCK=true` silently ran the LIVE
+  carriers instead of the mock, and `.env.example`'s shipped
+  `MOCK_QUICK_PATH_OK=true` evaluated to *False* — a trap on the exact
+  no-credentials path reviewers exercise. Meanwhile `config.py` defined five
+  `*_mock*`/`carrier_mock` Settings fields that nothing ever read.
+  `auto_repair.is_enabled()` already parsed `REPAIR_ENABLED` the tolerant way.
+- **Fix:** new `backend/env_flags.env_truthy(name, default)` — accepts
+  `1/true/yes/on` (case-insensitive, whitespace-trimmed); unrecognized →
+  `default` so a typo never silently flips a flag. Routed registry's
+  `CARRIER_MOCK`, mock.py's four flags, and `auto_repair`'s `REPAIR_ENABLED`
+  through it. Removed the five never-read Settings fields from `config.py`
+  (the wrong abstraction — these flags must be read at call time, after
+  per-process monkeypatch, not from the import-frozen `settings` singleton)
+  with a pointer comment. Also fixed a stale `base.py` docstring that named a
+  nonexistent `runner.py`/`FlowRunner` (→ `orchestrator.execute_login`).
+- **Strictly additive:** every previously-working input maps identically; the
+  only deltas are the documented widening (`true/yes/on` now accepted) plus the
+  two intended fixes. Adversarial sub-agent review clean; confirmed at real
+  process level (`CARRIER_MOCK=true uv run python -c …` → `MockFlow`;
+  unset → `UsaaFlow`).
+- **Tests:** +38 (`tests/test_env_flags.py`) — `env_truthy`
+  spellings/defaults/typo-safety, registry mock-selection incl. the
+  `CARRIER_MOCK=true` regression, and the mock flags incl. the
+  `MOCK_QUICK_PATH_OK=true` regression.
+- **Verify:** full offline suite **238 passed, 2 skipped** (~16s, was 200);
+  `ruff check` clean. Committed on `main`; not pushed (orchestrator handles
+  push).
+
 ### 2026-06-17 — Fix SSE keepalive on DONE + guarantee terminal repair_done
 
 Maintenance pass. Fixed a real latent bug in the SSE termination logic that

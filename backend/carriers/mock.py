@@ -1,23 +1,26 @@
 """Mock carrier flow for testing the full stack without real credentials.
 
-Enable by setting `CARRIER_MOCK=true` in your environment. The registry will
-substitute this for the active carrier (Geico). Useful for:
+Enable by setting `CARRIER_MOCK=true` (or `1`/`yes`/`on`) in your environment.
+The registry substitutes this for the live carriers. Useful for:
 
 - End-to-end testing of FastAPI + SSE + frontend without a network roundtrip
 - Latency measurement of the framework code (Playwright is ~1.5s of the budget;
   the mock collapses that to ~0.2s so you can see the rest of the overhead)
 - Reproducing edge cases: wrong password (MOCK_BAD_PASSWORD=1), MFA timeout,
   no-MFA path (MOCK_SKIP_MFA=1)
+
+These flags are read at call time via `env_flags.env_truthy` so the test suite
+and demo can flip them per process; any of `1/true/yes/on` count as set.
 """
 
 from __future__ import annotations
 
 import asyncio
-import os
 
 import httpx
 from playwright.async_api import BrowserContext, Page
 
+from ..env_flags import env_truthy
 from ..models import Carrier, Document
 from .base import CarrierFlow
 
@@ -40,21 +43,21 @@ class MockFlow(CarrierFlow):
 
     async def login(self, page: Page, username: str, password: str) -> None:
         await asyncio.sleep(0.4)
-        if os.getenv("MOCK_BAD_PASSWORD") == "1":
+        if env_truthy("MOCK_BAD_PASSWORD"):
             raise RuntimeError("Invalid username or password")
         self._username = username
 
     async def mfa_required(self, page: Page) -> bool:
-        return os.getenv("MOCK_SKIP_MFA") != "1"
+        return not env_truthy("MOCK_SKIP_MFA")
 
     async def submit_mfa(self, page: Page, code: str) -> None:
         await asyncio.sleep(0.2)
-        if os.getenv("MOCK_BAD_MFA") == "1":
+        if env_truthy("MOCK_BAD_MFA"):
             raise RuntimeError("Invalid verification code")
 
     async def is_authenticated(self, page: Page) -> bool:
-        # Force quick-path to succeed on second runs
-        return os.getenv("MOCK_QUICK_PATH_OK", "1") == "1"
+        # Force quick-path to succeed on second runs (default on)
+        return env_truthy("MOCK_QUICK_PATH_OK", default=True)
 
     async def fetch_documents(
         self,

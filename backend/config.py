@@ -20,11 +20,12 @@ class Settings(BaseSettings):
     log_backup_count: int = 5
     worker_base_url: str | None = None
     worker_proxy_carriers: str = "usaa"
-    carrier_mock: bool = False
-    mock_bad_password: bool = False
-    mock_bad_mfa: bool = False
-    mock_skip_mfa: bool = False
-    mock_quick_path_ok: bool = True
+    # NOTE: the mock-carrier toggles (CARRIER_MOCK, MOCK_BAD_PASSWORD,
+    # MOCK_BAD_MFA, MOCK_SKIP_MFA, MOCK_QUICK_PATH_OK) are intentionally NOT
+    # settings here. They must be read at call time so the test suite and demo
+    # can flip them per process after import; see `backend/env_flags.env_truthy`
+    # and `backend/carriers/{registry,mock}.py`. extra="ignore" lets them sit in
+    # .env without error.
 
     # Optional credentials for smoke tests and demo pre-fill
     geico_username: str | None = None
