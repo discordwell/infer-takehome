@@ -49,11 +49,18 @@ async def trigger(session_id: str) -> dict:
 
     if not auto_repair.is_enabled():
         log.info(
-            "feedback_recovery: REPAIR_ENABLED is false — "
-            "marking session and surfacing to user without spawning claude"
+            "feedback_recovery: REPAIR_ENABLED is false — surfacing a terminal "
+            "verdict to the user instead of spawning claude"
         )
         session.feedback_recovery_active = True
-        session.repair_kicked = True  # SSE will keep stream open
+        session.repair_kicked = True
+        # No repair will run, so close the loop with a terminal verdict rather
+        # than leaving the reopened SSE waiting on a repair_done that won't come.
+        manager.publish_repair_done(
+            session_id,
+            verdict="NEED_HUMAN",
+            first_line="Automatic repair is disabled in this environment.",
+        )
         return {"ok": True, "reason": "repair-disabled-but-flagged"}
 
     # 1. Analyze the rejected docs so claude knows what was wrong.
@@ -102,5 +109,14 @@ async def trigger(session_id: str) -> dict:
             "feedback_recovery: capture_and_kick returned False "
             "(folded into existing repair or disabled) session=%s",
             session_id,
+        )
+        # A fresh repair did not start for THIS session — it folded into an
+        # already-active carrier repair whose repair_done only reaches the
+        # owning session. Surface a terminal verdict so this session's reopened
+        # SSE doesn't hang waiting for an event that will never arrive here.
+        manager.publish_repair_done(
+            session_id,
+            verdict="NEED_HUMAN",
+            first_line="Folded into an active repair for this carrier.",
         )
     return {"ok": True, "kicked": kicked}

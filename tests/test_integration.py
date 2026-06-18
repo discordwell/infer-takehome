@@ -74,6 +74,119 @@ async def test_full_login_flow_with_mfa(client):
     assert doc_resp.content.startswith(b"%PDF")
 
 
+async def test_sse_stays_open_during_feedback_recovery(client):
+    """A user rejecting docs sets repair_kicked while the session stays in DONE.
+
+    Regression: the reopened SSE must stay open to stream the live repair log
+    and deliver replacement docs — only `repair_done` closes it. Before the fix,
+    the stream closed on the first DONE snapshot, so none of that reached the
+    client.
+    """
+    from backend.models import Document
+    from backend.session_manager import manager
+
+    # Drive a normal flow to DONE.
+    sid = (
+        await client.post(
+            "/api/login",
+            json={"carrier": "geico", "username": "reject@x", "password": "pw"},
+        )
+    ).json()["session_id"]
+    collector = asyncio.create_task(_collect_states(client, sid))
+    await asyncio.sleep(0.6)
+    await client.post(f"/api/mfa/{sid}", json={"code": "1"})
+    await collector  # session is now DONE
+
+    # Simulate feedback recovery having kicked a repair for this session.
+    manager.get(sid).repair_kicked = True
+
+    received: list[dict] = []
+
+    async def reader() -> None:
+        async with client.stream("GET", f"/api/status/{sid}") as resp:
+            assert resp.status_code == 200
+            async for line in resp.aiter_lines():
+                if line.startswith("data:"):
+                    payload = json.loads(line[len("data:"):].strip())
+                    received.append(payload)
+                    if payload.get("event") == "repair_done":
+                        return
+
+    task = asyncio.create_task(reader())
+    # Wait until the reader has actually subscribed before publishing, else the
+    # events would have no queue to land in. On the buggy code the subscriber is
+    # torn down on the first DONE snapshot, so this poll never sees it.
+    try:
+        for _ in range(100):
+            if manager.get(sid).subscribers:
+                break
+            await asyncio.sleep(0.02)
+        assert manager.get(sid).subscribers, "reader stream closed before repair output"
+
+        # Live repair activity + replacement docs arrive while still in DONE.
+        manager.publish_repair_log(
+            sid, {"turn": 1, "kind": "text", "text": "searching for better docs"}
+        )
+        manager.set_docs(
+            sid,
+            [Document(id="betterdoc", name="better.pdf", size_bytes=4)],
+            {"betterdoc": b"%PDF"},
+        )
+        manager.publish_repair_done(sid, verdict="DONE", first_line="STATUS: DONE")
+
+        await asyncio.wait_for(task, timeout=5.0)
+    finally:
+        if not task.done():
+            task.cancel()
+
+    events = [e.get("event") for e in received]
+    assert "repair_log" in events, f"missing live repair log: {events}"
+    assert any(
+        e.get("event") == "docs_ready"
+        and e.get("docs")
+        and any(d["id"] == "betterdoc" for d in e["docs"])
+        for e in received
+    ), f"replacement docs never delivered: {received}"
+    assert events[-1] == "repair_done", f"stream did not end on repair_done: {events}"
+
+
+async def test_sse_reconnect_after_repair_done_does_not_hang(client):
+    """A client reconnecting AFTER the repair concluded must replay the terminal
+    verdict and close on its own — not hang forever on the repair_kicked session
+    whose repair_done already fired.
+    """
+    from backend.session_manager import manager
+
+    sid = (
+        await client.post(
+            "/api/login",
+            json={"carrier": "geico", "username": "reconnect@x", "password": "pw"},
+        )
+    ).json()["session_id"]
+    collector = asyncio.create_task(_collect_states(client, sid))
+    await asyncio.sleep(0.6)
+    await client.post(f"/api/mfa/{sid}", json={"code": "1"})
+    await collector  # session is now DONE
+
+    # Repair was kicked and concluded while the client was disconnected.
+    manager.get(sid).repair_kicked = True
+    manager.publish_repair_done(sid, verdict="NEED_HUMAN", first_line="needs a human")
+
+    received: list[dict] = []
+
+    async def reader() -> None:
+        async with client.stream("GET", f"/api/status/{sid}") as resp:
+            assert resp.status_code == 200
+            async for line in resp.aiter_lines():
+                if line.startswith("data:"):
+                    received.append(json.loads(line[len("data:"):].strip()))
+
+    # On the buggy code this stream would hang (heartbeats forever) and the
+    # wait_for would time out. With the terminal replay it closes promptly.
+    await asyncio.wait_for(asyncio.create_task(reader()), timeout=5.0)
+    assert any(e.get("event") == "repair_done" for e in received), received
+
+
 async def test_mfa_for_unknown_session_404s(client):
     r = await client.post("/api/mfa/does-not-exist", json={"code": "0"})
     assert r.status_code == 404

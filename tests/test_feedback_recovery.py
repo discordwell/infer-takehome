@@ -72,6 +72,29 @@ async def test_trigger_when_repair_disabled_still_flags_session(
     assert session_with_docs.feedback_recovery_active is True
     assert session_with_docs.repair_kicked is True
     kick.assert_not_awaited()
+    # No repair will run, so a terminal verdict is recorded for the reopened SSE
+    # to replay — otherwise that stream would hang waiting on a repair_done.
+    assert session_with_docs.repair_terminal is not None
+    assert session_with_docs.repair_terminal["verdict"] == "NEED_HUMAN"
+
+
+async def test_trigger_folded_into_active_repair_publishes_terminal(
+    monkeypatch, session_with_docs
+):
+    """When the kick folds into an already-active carrier repair, the owning
+    session gets the repair_done — not this one. trigger must record a terminal
+    verdict here so this session's reopened SSE can replay it and close."""
+    monkeypatch.setattr(auto_repair, "is_enabled", lambda: True)
+    monkeypatch.setattr(pdf_analyzer, "analyze", AsyncMock(return_value=[]))
+    monkeypatch.setattr(
+        auto_repair, "capture_and_kick", AsyncMock(return_value=False)
+    )
+
+    result = await feedback_recovery.trigger(session_with_docs.id)
+
+    assert result == {"ok": True, "kicked": False}
+    assert session_with_docs.repair_terminal is not None
+    assert session_with_docs.repair_terminal["verdict"] == "NEED_HUMAN"
 
 
 async def test_trigger_unknown_session():

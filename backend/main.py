@@ -13,7 +13,7 @@ from sse_starlette.sse import EventSourceResponse
 from . import auto_repair, email_notifier, feedback_recovery, identity, result_store
 from .config import settings
 from .logging_config import configure_logging
-from .models import Carrier, LoginRequest, MfaRequest, SessionState
+from .models import Carrier, LoginRequest, MfaRequest, SessionState, StatusEvent
 from .orchestrator import execute_login
 from .playwright_runner import runner
 from .session_manager import SessionNotFoundError, manager
@@ -131,6 +131,28 @@ def _json(
     return resp
 
 
+def _should_close_stream(evt: StatusEvent, *, repair_active: bool) -> bool:
+    """Whether the SSE stream should close after delivering ``evt``.
+
+    A ``repair_done`` event is always terminal. Otherwise the stream closes
+    once the session reaches a terminal state (DONE or ERROR) — UNLESS a repair
+    is in flight for this session (``repair_active``), in which case we hold the
+    stream open so the live repair log and any same-run re-delivered docs still
+    reach the client.
+
+    This covers both paths that set ``repair_kicked``: an orchestrator failure
+    (state ERROR) and user-rejected feedback recovery, which leaves the session
+    in DONE while Claude looks for better docs. Without honoring the flag on
+    DONE, the reopened feedback-recovery stream would close on the first DONE
+    snapshot and never deliver the live log or the replacement documents.
+    """
+    if evt.event == "repair_done":
+        return True
+    if evt.state in (SessionState.DONE, SessionState.ERROR):
+        return not repair_active
+    return False
+
+
 @app.get("/api/status/{session_id}")
 async def status_stream(session_id: str, request: Request) -> EventSourceResponse:
     if worker_proxy.has_session(session_id):
@@ -165,22 +187,20 @@ async def status_stream(session_id: str, request: Request) -> EventSourceRespons
                 if uid:
                     slot_manager.tick(uid)
                 yield {"event": evt.event, "data": evt.model_dump_json()}
-                if evt.event == "repair_done":
-                    break
-                if evt.state == SessionState.DONE:
-                    break
-                if evt.state == SessionState.ERROR:
-                    # Keep the stream open only if a repair was actually
-                    # kicked for this specific session — otherwise (auto-repair
-                    # disabled, or per-carrier dedup folded our failure) the
-                    # client would block forever waiting for repair_done events
-                    # that won't arrive.
+                # A repair kicked for this session (orchestrator ERROR, or a
+                # user-rejected feedback recovery that stays in DONE) holds the
+                # stream open past the terminal state so the live repair log and
+                # any same-run re-delivered docs still reach the client. Without
+                # an active repair the stream closes on DONE/ERROR rather than
+                # blocking forever on repair_done events that won't arrive.
+                repair_active = False
+                if evt.state in (SessionState.DONE, SessionState.ERROR):
                     try:
-                        session = manager.get(session_id)
-                        if not session.repair_kicked:
-                            break
+                        repair_active = manager.get(session_id).repair_kicked
                     except SessionNotFoundError:
-                        break
+                        repair_active = False
+                if _should_close_stream(evt, repair_active=repair_active):
+                    break
         finally:
             manager.unsubscribe(session_id, queue)
             # Always release: tab closed, flow finished, or repair done.

@@ -2,6 +2,55 @@
 
 ## Session Summaries
 
+### 2026-06-17 — Fix SSE keepalive on DONE + guarantee terminal repair_done
+
+Maintenance pass. Fixed a real latent bug in the SSE termination logic that
+silently broke the feedback-recovery ("Wrong documents") live UI + same-run
+doc delivery, then closed the follow-on hang class it exposed.
+
+- **Primary bug:** `feedback_recovery.trigger` sets `repair_kicked = True`
+  with the comment `# SSE will keep stream open`, but the auto-repair flow
+  never transitions session state — so during feedback recovery the session
+  stays in `DONE` the whole time. The SSE `event_gen` in `main.py` honored
+  `repair_kicked` only on `ERROR`, not `DONE`: it broke unconditionally on
+  the first `DONE` snapshot. So the reopened feedback-recovery stream closed
+  before any live repair log or re-delivered `docs_ready` reached the client
+  (the frontend's `rejectedDocIds` guard was a band-aid over this). The
+  orchestrator-ERROR repair path worked; only the user-rejected (DONE) path
+  was broken.
+- **Primary fix:** extracted pure `main._should_close_stream(evt, *,
+  repair_active)` — `repair_done` always terminal; `DONE`/`ERROR` terminal
+  only when no repair is in flight. Unifies the two branches and makes `DONE`
+  honor `repair_kicked` symmetrically. Verified strict behavior-preservation
+  for happy-path DONE, ERROR±repair_kicked, and repair_done (adversarial
+  sub-agent review + revert-test: the integration test hangs/fails on the
+  old code).
+- **Follow-on (exposed by the primary fix):** holding the stream open on
+  `repair_kicked` surfaced three "held open but no `repair_done` will ever
+  come" hangs: (a) a client reconnecting AFTER a real `repair_done` (network
+  blip during a multi-minute repair — affects the *production* ERROR path
+  too), (b) `REPAIR_ENABLED=false` feedback, (c) a kick folded into an
+  already-active carrier repair (its `repair_done` only reaches the owning
+  session).
+- **Invariant fix:** a `repair_kicked` session is always guaranteed a
+  terminal `repair_done`, delivered live AND replayed on reconnect.
+  `session_manager.publish_repair_done` records the verdict on
+  `Session.repair_terminal`; `subscribe()` replays it FIRST (ahead of
+  repair_log + snapshot) so a post-conclusion reconnect closes immediately.
+  `feedback_recovery` publishes a `NEED_HUMAN` terminal in the disabled +
+  folded cases. Bonus: the disabled/folded terminals also fix a latent
+  email-watcher hang (previously those sat on the 5h `notify_wall_seconds`).
+- **Tests:** +16 (`tests/test_sse_termination.py` unit-tests the pure rule;
+  `test_integration.py` adds two SSE regression tests — stays-open-during-
+  feedback-recovery and reconnect-after-done-doesn't-hang, both proven to
+  fail on the pre-fix code; `test_session_manager.py` covers terminal-replay
+  ordering + success-path doc re-delivery; `test_feedback_recovery.py` covers
+  disabled + folded terminals). Two adversarial sub-agent reviews, both clean.
+- **Verify:** full offline suite **200 passed, 2 skipped** (~15s, was 184
+  passed); `ruff check` clean. Docs: ARCHITECTURE.md "Live auto-repair UI"
+  updated with the `_should_close_stream` rule + the terminal-replay
+  invariant. Committed on `main`; not pushed (orchestrator handles push).
+
 ### 2026-06-17 — Fix STATUS-verdict parser bug + first auto_repair tests
 
 Maintenance pass. Found and fixed a real latent bug in the auto-repair

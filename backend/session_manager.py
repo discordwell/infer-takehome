@@ -35,6 +35,10 @@ class Session:
     notify_email: str | None = None
     notify_started_at: float | None = None
     pdf_analysis: list[dict] | None = None
+    # Set once a repair concludes (the repair_done chunk). Replayed to any
+    # client that subscribes afterward so a reconnect past the terminal verdict
+    # doesn't hang on a repair_kicked session whose repair_done already fired.
+    repair_terminal: dict | None = None
 
 
 class SessionNotFoundError(Exception):
@@ -78,6 +82,22 @@ class SessionManager:
         session = self.get(session_id)
         queue: asyncio.Queue[StatusEvent] = asyncio.Queue()
         session.subscribers.append(queue)
+        # If a repair already concluded, deliver the terminal verdict first so a
+        # client that reconnects past it (or one whose repair never ran — the
+        # disabled/folded feedback-recovery cases) receives repair_done and
+        # closes, instead of holding the stream open forever. Set only once the
+        # repair is over, so an in-flight repair still streams its live log.
+        if session.repair_terminal is not None:
+            queue.put_nowait(
+                StatusEvent(
+                    event="repair_done",
+                    state=session.state,
+                    detail=session.detail,
+                    server_ts_ms=int(time.time() * 1000),
+                    repair_chunk=session.repair_terminal,
+                    repair_active=False,
+                )
+            )
         # Replay any accumulated repair_log so a late SSE reconnect catches up.
         for chunk in session.repair_log:
             queue.put_nowait(
@@ -200,6 +220,10 @@ class SessionManager:
         if session is None:
             return
         chunk = {"verdict": verdict, "first_line": first_line}
+        # Remember the verdict so a client that reconnects after this fires
+        # replays it (via subscribe) and closes, rather than hanging on a
+        # repair_kicked session whose repair_done won't come a second time.
+        session.repair_terminal = chunk
         snapshot = StatusEvent(
             event="repair_done",
             state=session.state,

@@ -179,6 +179,63 @@ def test_set_error_transitions_to_error_and_publishes():
     assert evt.error == "bad password"
 
 
+def test_subscribe_replays_terminal_verdict_first_even_with_repair_log():
+    """A client that reconnects after repair_done must replay the terminal
+    verdict FIRST — ahead of the repair_log replay and snapshot — so its stream
+    closes immediately instead of hanging on a repair_kicked session whose
+    repair_done won't fire a second time. Ordering is load-bearing: the
+    repair_log replays carry the terminal state, so the terminal must precede
+    them to guarantee closure regardless of repair_kicked."""
+    mgr = SessionManager()
+    session = mgr.create(Carrier.USAA, "user")
+    session.repair_kicked = True
+    session.state = SessionState.DONE
+    # A repair ran (some live log) and then concluded while nobody was connected.
+    mgr.publish_repair_log(session.id, {"turn": 1, "kind": "text", "text": "probing"})
+    mgr.publish_repair_done(session.id, verdict="DONE", first_line="STATUS: DONE")
+    assert session.repair_terminal == {"verdict": "DONE", "first_line": "STATUS: DONE"}
+
+    # The late subscriber receives the terminal verdict before anything else.
+    queue = mgr.subscribe(session.id)
+    evt = queue.get_nowait()
+    assert evt.event == "repair_done"
+    assert evt.repair_chunk == {"verdict": "DONE", "first_line": "STATUS: DONE"}
+    assert evt.repair_active is False
+    # The replayed log + snapshot still follow (the stream closes on the first
+    # event, but the queue is fully populated).
+    remaining = [queue.get_nowait().event for _ in range(queue.qsize())]
+    assert "repair_log" in remaining
+    assert "state_change" in remaining
+
+
+def test_subscribe_after_successful_repair_redelivers_docs():
+    """Reconnect after a successful repair: the terminal closes the stream, but
+    the snapshot in the same batch still carries the newly delivered docs, so a
+    client that missed the live docs_ready can still recover them."""
+    mgr = SessionManager()
+    session = mgr.create(Carrier.USAA, "user")
+    session.repair_kicked = True
+    new_docs = [Document(id="better", name="better.pdf", size_bytes=4)]
+    mgr.set_docs(session.id, new_docs, {"better": b"%PDF"})  # docs_ready, state DONE
+    mgr.publish_repair_done(session.id, verdict="DONE", first_line="STATUS: DONE")
+
+    queue = mgr.subscribe(session.id)
+    events = [queue.get_nowait() for _ in range(queue.qsize())]
+    assert events[0].event == "repair_done"  # terminal first → closes the stream
+    snapshot = next(e for e in events if e.event == "state_change")
+    assert [d.id for d in (snapshot.docs or [])] == ["better"]
+
+
+def test_subscribe_without_terminal_emits_only_snapshot():
+    """Sessions with no concluded repair never replay a repair_done on subscribe."""
+    mgr = SessionManager()
+    session = mgr.create(Carrier.GEICO, "user")
+    queue = mgr.subscribe(session.id)
+    evt = queue.get_nowait()
+    assert evt.event == "state_change"
+    assert queue.empty()
+
+
 def test_unsubscribe_stops_publishing():
     mgr = SessionManager()
     session = mgr.create(Carrier.GEICO, "user")
