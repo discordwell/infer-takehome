@@ -2,6 +2,44 @@
 
 ## Session Summaries
 
+### 2026-06-24 14:48 UTC — Safe Content-Disposition for scraped doc names (fix 500 on em-dash titles)
+
+Maintenance pass. Fixed a real robustness + security bug on the core
+document-serving path: `GET /api/docs/{sid}/{doc_id}` built its
+`Content-Disposition` header by f-string-interpolating the **scraped** carrier
+doc name straight into `filename="…"`.
+
+- **Bug:** carrier doc names come from portal page text (`page.inner_text()` /
+  `eval_on_selector_all`) and routinely contain characters illegal in an HTTP
+  header. (a) A non-latin-1 rune — an em-dash `–` (U+2013) in a title like
+  "Auto Policy – Declarations", or any accented/CJK char — made Starlette's
+  latin-1 header encoding raise `UnicodeEncodeError` → **HTTP 500**, so that PDF
+  *never rendered* (the whole point of the app). (b) An embedded `"` broke the
+  quoted-string so browsers mangled the filename. (c) CR/LF was a header-injection
+  vector. The mock carrier uses only safe ASCII names, so the test suite was
+  green while realistic carrier data would 500. Verified the old path raises
+  with a direct repro.
+- **Fix:** new pure `main._content_disposition(name, *, disposition="inline")`.
+  Pure-unreserved-ASCII names keep the simple `filename="…"`; anything else gets
+  an RFC 6266 pair — a sanitized ASCII `filename` fallback (control bytes + `"`
+  stripped) plus a percent-encoded UTF-8 `filename*` (RFC 5987). Lone surrogates
+  are scrubbed first (they'd make `quote()` raise and re-introduce the 500).
+  Wired into `get_doc`; the worker-proxied path already forwards the worker's
+  own (now-safe) header, so the guarantee holds end-to-end. No other unsanitized
+  `Content-Disposition` construction exists in the backend.
+- **Tests:** +15. `tests/test_content_disposition.py` (pure helper: simple form,
+  em-dash round-trip, embedded-quote exact-header pin, CRLF-no-injection,
+  CJK/accented, lone-surrogate-no-raise, empty→"document") +
+  `test_integration.py::test_doc_with_non_ascii_name_renders` (full HTTP path:
+  inject an em-dash+quote doc name, assert 200 + `filename*` + `%E2%80%93`).
+- **Verify:** full offline suite **259 passed, 2 skipped** (~18s, was 244);
+  `ruff check` clean. Adversarial sub-agent review confirmed the simple-form
+  branch is provably unreachable by any dangerous char class (only the 66 RFC
+  3986 unreserved chars), the `filename*` encoding is RFC-correct, and the fix
+  is complete across both serving paths; its one finding (lone-surrogate raise)
+  was folded in. ARCHITECTURE.md main.py section documents the guard. Committed
+  on `main`; not pushed (orchestrator handles push).
+
 ### 2026-06-23 — Treat a zero-document fetch as a failure (central orchestrator guard)
 
 Maintenance pass. Closed a real reliability gap in the core login→docs flow:

@@ -57,6 +57,8 @@ Drop-in replacement for testing the stack without real credentials. Enable with 
 ### `backend/main.py`
 FastAPI app: `POST /api/login`, `GET /api/status/{id}` (SSE), `POST /api/mfa/{id}`, `GET /api/docs/{id}/{doc_id}`, `GET /api/cache` (boring per-uid fallback). Mounts `frontend/` as static. Issues a `demo_uid` cookie on first response via `identity.py`.
 
+**Doc-name header safety:** `/api/docs/{id}/{doc_id}` builds its `Content-Disposition` filename from the *scraped* carrier doc name via `_content_disposition()`. That name is untrusted portal text, so the helper emits an RFC 6266 pair (ASCII `filename` fallback + percent-encoded UTF-8 `filename*`). Without it a name with a non-latin-1 rune (an em-dash in "Auto Policy – Declarations") raised `UnicodeEncodeError` when Starlette latin-1-encoded the header → a 500 and the PDF never rendered; embedded quotes mangled the filename and CR/LF was a header-injection vector. The worker-proxied path forwards the worker's already-safe header, so the guarantee holds end-to-end.
+
 ### `backend/identity.py`
 Cookie-based user identity (`demo_uid`, 30d, HttpOnly). NAT-resilient — different browsers behind the same NAT get different uids. Not authentication; whoever holds the cookie owns the slot and per-uid cache.
 

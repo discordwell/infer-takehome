@@ -225,6 +225,40 @@ async def test_doc_for_unknown_doc_id_404s(client):
     assert r.status_code == 404
 
 
+async def test_doc_with_non_ascii_name_renders(client):
+    """A doc whose scraped name carries an em-dash + quote must still serve
+    (200) with a wire-safe Content-Disposition. Before the fix, latin-1
+    header encoding raised on the em-dash and the PDF fetch 500'd.
+    """
+    from backend.models import Document
+    from backend.session_manager import manager
+
+    sid = (
+        await client.post(
+            "/api/login",
+            json={"carrier": "geico", "username": "special@x", "password": "pw"},
+        )
+    ).json()["session_id"]
+    collector = asyncio.create_task(_collect_states(client, sid))
+    await asyncio.sleep(0.6)
+    await client.post(f"/api/mfa/{sid}", json={"code": "1"})
+    await collector
+
+    # Inject a doc whose name mirrors realistic scraped portal text.
+    sess = manager.get(sid)
+    sess.docs.append(
+        Document(id="dec-em", name='Auto Policy – Declarations".pdf', size_bytes=13)
+    )
+    sess.doc_bytes["dec-em"] = b"%PDF-1.4 body"
+
+    r = await client.get(f"/api/docs/{sid}/dec-em")
+    assert r.status_code == 200
+    assert r.content == b"%PDF-1.4 body"
+    cd = r.headers["content-disposition"]
+    assert "filename*=utf-8''" in cd
+    assert "%E2%80%93" in cd  # em-dash preserved, percent-encoded
+
+
 async def test_second_uid_gets_423_on_busy_carrier(
     fake_playwright, mock_carrier, tmp_session_dir
 ):

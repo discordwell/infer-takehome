@@ -4,6 +4,7 @@ import asyncio
 import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
+from urllib.parse import quote
 
 from fastapi import FastAPI, HTTPException, Request, status
 from fastapi.responses import FileResponse, JSONResponse, Response
@@ -151,6 +152,47 @@ def _should_close_stream(evt: StatusEvent, *, repair_active: bool) -> bool:
     if evt.state in (SessionState.DONE, SessionState.ERROR):
         return not repair_active
     return False
+
+
+def _content_disposition(name: str, *, disposition: str = "inline") -> str:
+    """Build a safe ``Content-Disposition`` header value for a document name.
+
+    Carrier doc names are scraped from portal page text and routinely contain
+    characters that can't be dropped into an HTTP header verbatim:
+
+    - **non-latin-1 runes** (an em-dash ``–`` in "Auto Policy – Declarations",
+      accented letters): Starlette latin-1-encodes header values, so these
+      raise ``UnicodeEncodeError`` → a 500 and the PDF never renders;
+    - **embedded quotes**: break the ``filename="…"`` quoted-string so browsers
+      truncate or mangle the name;
+    - **CR/LF**: a header-injection vector.
+
+    Following RFC 6266, emit a sanitized ASCII ``filename`` fallback plus a
+    percent-encoded UTF-8 ``filename*`` (RFC 5987) — the same shape Starlette's
+    ``FileResponse`` uses for non-ASCII names, but stricter: we also carry the
+    ASCII fallback and scrub quotes/control bytes, which Starlette's simple
+    branch does not. Pure-unreserved-ASCII names keep the simple, maximally
+    compatible ``filename="…"`` form.
+    """
+    # Scrub lone surrogates first (they'd make quote() raise — re-introducing
+    # the very 500 this guards against); well-formed names, ASCII or not, are
+    # left byte-for-byte unchanged.
+    name = (name or "document").encode("utf-8", "replace").decode("utf-8")
+    encoded = quote(name, safe="")
+    if encoded == name:
+        return f'{disposition}; filename="{name}"'
+    ascii_fallback = (
+        "".join(
+            c
+            for c in name.encode("ascii", "ignore").decode("ascii")
+            if c.isprintable() and c != '"'
+        ).strip()
+        or "document"
+    )
+    return (
+        f'{disposition}; filename="{ascii_fallback}"; '
+        f"filename*=utf-8''{encoded}"
+    )
 
 
 @app.get("/api/status/{session_id}")
@@ -360,10 +402,9 @@ async def get_doc(session_id: str, doc_id: str) -> Response:
         doc_meta = next((d for d in session.docs if d.id == doc_id), None)
     except SessionNotFoundError:
         doc_meta = manager.get_persisted_doc(session_id, doc_id)
+    filename = doc_meta.name if doc_meta else f"{doc_id}.pdf"
     headers = {
-        "Content-Disposition": (
-            f'inline; filename="{doc_meta.name if doc_meta else doc_id + ".pdf"}"'
-        ),
+        "Content-Disposition": _content_disposition(filename),
         "Cache-Control": "no-store",
     }
     return Response(
