@@ -2,6 +2,47 @@
 
 ## Session Summaries
 
+### 2026-06-23 — Treat a zero-document fetch as a failure (central orchestrator guard)
+
+Maintenance pass. Closed a real reliability gap in the core login→docs flow:
+a carrier that returned **0 documents** was published to the user as a
+successful `DONE` ("0 documents retrieved") instead of erroring.
+
+- **Bug:** the orchestrator never checked that a fetch returned anything. Two
+  consequences: (a) on the **quick path** (stored cookies), an empty fetch
+  "succeeded" with nothing rather than falling back to a fresh login when the
+  saved session was merely stale — a session-reuse reliability hole; (b) on
+  the **full-login path**, a genuine adapter failure that returned `([], {})`
+  surfaced as a misleading 0-doc `DONE` instead of `ERROR` (so the user got
+  no error and auto-repair never engaged). `backend/carriers/geico.py:247`
+  was the concrete silent-empty offender (it only `log.warning`s on no links,
+  then returns empty); the quick path could do the same for any carrier.
+  Notably the **auto-repair verifier already enforced** this invariant
+  (`auto_repair.py:807` → `"fetch_documents returned 0 documents"`), so the
+  main orchestrator path was inconsistent with the project's own contract.
+- **Fix:** new `orchestrator.NoDocumentsError` + pure `_require_documents()`
+  helper, wired into `_fetch_documents_with_progress` — the single chokepoint
+  all three fetch sites (USAA-direct quick, generic quick, full login) funnel
+  through, so the guarantee holds for every carrier and any future one.
+  Empty quick-path fetch → `NoDocumentsError` → caught → `_try_quick_path`
+  returns False → fresh login. Empty full-login fetch → propagates → top-level
+  handler → `set_error("carrier returned no documents")` + auto-repair kick.
+  Identity-preserving on the happy path (returns the tuple unchanged). Left
+  Geico's warning + debug-dump in place — diagnostics still fire, then the
+  orchestrator raises.
+- **Tests:** +6 (`tests/test_orchestrator_unit.py`) — pure `_require_documents`
+  (pass-through incl. identity, raise-on-empty, raise-with-orphan-bytes),
+  `_try_quick_path` empty→False vs docs→True, and full-login empty→ERROR with
+  auth-state-saved-before-fetch (mirrors the existing fetch-failure test).
+- **Verify:** full offline suite **244 passed, 2 skipped** (~18s, was 238);
+  `ruff check` clean. Adversarial sub-agent review clean across quick path
+  (both sub-branches), full-login, happy-path identity, partial-progress
+  interleaving, and all six carriers' top-level `fetch_documents`. Confirmed
+  no carrier returns `([], {})` as a legitimate success (USAA/generic/Mercury
+  all raise; Geico's silent-empty is exactly the bug). ARCHITECTURE.md
+  orchestrator section documents the guard. Committed on `main`; not pushed
+  (orchestrator handles push).
+
 ### 2026-06-18 — Fix stringly-typed mock env flags (CARRIER_MOCK=true was a no-op)
 
 Maintenance pass. Fixed a reviewer-facing latent config bug and removed the

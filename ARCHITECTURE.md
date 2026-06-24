@@ -37,6 +37,8 @@ Persists Playwright `storage_state` to `storage/sessions/<sha256(carrier+usernam
 ### `backend/orchestrator.py`
 The login orchestration is here, not on the carrier. It tries the quick-path first (load stored cookies → `flow.is_authenticated()` → fetch docs), and falls back to full login + MFA on failure. Keeping orchestration out of `CarrierFlow` means each new carrier only writes the four hooks.
 
+**Empty-document guard:** every fetch funnels through `_fetch_documents_with_progress`, which raises `NoDocumentsError` if a flow returns zero documents. A run exists to surface policy PDFs, so an empty result is always a failure — never a `DONE` with "0 documents retrieved." On the quick path this forces a fresh login (the stored session was probably stale); on the full-login path it surfaces `ERROR` so the user sees a clear message and auto-repair engages. This matches the auto-repair verifier, which already rejects a fix whose `fetch_documents` returns 0 documents.
+
 ### `backend/playwright_runner.py`
 Singleton that owns the Playwright + Chromium lifecycle. `new_context()` is an async context manager; `http_from_context()` lifts cookies from a `BrowserContext` into an `httpx.AsyncClient` for fast post-auth fetches.
 

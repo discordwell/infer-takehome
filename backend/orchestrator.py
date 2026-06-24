@@ -14,6 +14,24 @@ from .session_manager import SessionManager
 log = logging.getLogger(__name__)
 
 
+class NoDocumentsError(RuntimeError):
+    """A carrier flow completed but returned zero documents.
+
+    The whole point of a run is to surface policy documents, so an empty
+    result is a failure, never a success — yet without this guard the
+    orchestrator would publish ``DONE`` with an empty list and the UI would
+    cheerfully report "0 documents retrieved." Treating empty as an error:
+
+    - On the quick path (stored cookies), it forces a fresh login instead of
+      "succeeding" with nothing when the saved session is merely stale.
+    - On the full-login path, it surfaces ``ERROR`` so the user sees a clear
+      message and auto-repair can engage.
+
+    This mirrors the auto-repair verifier, which already rejects a fix whose
+    ``fetch_documents`` returns 0 documents.
+    """
+
+
 async def execute_login(
     manager: SessionManager,
     session_id: str,
@@ -344,9 +362,15 @@ async def _fetch_documents_with_progress(
     manager: SessionManager,
     session_id: str,
 ):
+    """Fetch documents, wiring up the optional progress callback.
+
+    Raises ``NoDocumentsError`` if the flow returns an empty result — the
+    single chokepoint where every orchestrator path funnels its fetch, so the
+    empty-as-failure guarantee holds for all carriers (and any future one).
+    """
     setter = getattr(flow, "set_documents_progress_callback", None)
     if not callable(setter):
-        return await flow.fetch_documents(page, http, ctx)
+        return _require_documents(await flow.fetch_documents(page, http, ctx))
 
     async def publish_progress(
         docs,
@@ -362,9 +386,17 @@ async def _fetch_documents_with_progress(
 
     setter(publish_progress)
     try:
-        return await flow.fetch_documents(page, http, ctx)
+        return _require_documents(await flow.fetch_documents(page, http, ctx))
     finally:
         setter(None)
+
+
+def _require_documents(result):
+    """Pass ``(docs, doc_bytes)`` through unchanged, or raise if ``docs`` is empty."""
+    docs, _doc_bytes = result
+    if not docs:
+        raise NoDocumentsError("carrier returned no documents")
+    return result
 
 
 def _reset_timing(flow: CarrierFlow) -> None:
